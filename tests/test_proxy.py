@@ -343,6 +343,7 @@ def test_prune_mode_can_trim_tools_catalog(tmp_path):
 
     with TestClient(app) as client:
         resp = client.post("/v1/messages", json=payload)
+        reqs = client.get("/_smartcontext/requests").json()["requests"]
 
     assert resp.status_code == 200
     forwarded = json.loads(seen["body"])
@@ -351,6 +352,9 @@ def test_prune_mode_can_trim_tools_catalog(tmp_path):
     names = {tool.get("name") for tool in forwarded["tools"]}
     assert "search_docs" in names
     assert "list_files" in names
+
+    assert reqs
+    assert int(reqs[0].get("tool_trim_tokens_saved_est") or 0) > 0
 
 
 def test_tools_catalog_is_untouched_when_trimming_disabled(tmp_path):

@@ -32,7 +32,7 @@ from .config import Settings
 from .local_model import LocalModel
 from .pruner import Pruner, estimate_payload_tokens
 from .store import Store, session_key_for
-from .tokens import relative_input_cost, usage_summary
+from .tokens import estimate_tokens, relative_input_cost, usage_summary
 
 log = logging.getLogger("smartcontext.proxy")
 
@@ -180,6 +180,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "latest_user_turn": latest_user_turn["text"] if latest_user_turn else None,
             "latest_user_message_index": latest_user_turn["message_index"] if latest_user_turn else None,
             "latest_user_text_block_index": latest_user_turn["text_block_index"] if latest_user_turn else None,
+            "tool_trim_tokens_saved_est": 0,
         }
 
         body = raw
@@ -190,6 +191,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 tools_changed = False
                 if settings.trim_tools:
                     latest_text = latest_user_turn["text"] if latest_user_turn else ""
+                    tools_tokens_before = _estimate_tools_tokens(payload)
                     working, before_tools, after_tools, trim_method = await _trim_tools_catalog(
                         working,
                         local=app.state.local,
@@ -197,6 +199,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         latest_user_text=latest_text,
                     )
                     tools_changed = before_tools > after_tools
+                    tools_tokens_after = _estimate_tools_tokens(working)
+                    record["tool_trim_tokens_saved_est"] = max(0, tools_tokens_before - tools_tokens_after)
                     if tools_changed:
                         record["note"] = f"tools trimmed {before_tools}->{after_tools} ({trim_method})"
 
@@ -388,6 +392,20 @@ def _outbound_headers(request: Request) -> dict[str, str]:
         k: v for k, v in request.headers.items()
         if k.lower() not in _SKIP_REQUEST_HEADERS
     }
+
+
+def _estimate_tools_tokens(payload: dict[str, Any]) -> int:
+    tools = payload.get("tools")
+    if not isinstance(tools, list):
+        return 0
+    total = 0
+    for tool in tools:
+        try:
+            text = json.dumps(tool, ensure_ascii=False)
+        except (TypeError, ValueError):
+            text = str(tool)
+        total += estimate_tokens(text)
+    return total
 
 
 def _inbound_headers(resp: httpx.Response) -> dict[str, str]:

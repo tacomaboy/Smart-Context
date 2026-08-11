@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS requests (
     latest_user_turn    TEXT,
     latest_user_message_index INTEGER,
     latest_user_text_block_index INTEGER,
+    tool_trim_tokens_saved_est INTEGER,
     latency_local_ms    REAL
 );
 CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(ts DESC);
@@ -133,6 +134,8 @@ class Store:
             self._conn.execute("ALTER TABLE requests ADD COLUMN latest_user_message_index INTEGER")
         if "latest_user_text_block_index" not in existing:
             self._conn.execute("ALTER TABLE requests ADD COLUMN latest_user_text_block_index INTEGER")
+        if "tool_trim_tokens_saved_est" not in existing:
+            self._conn.execute("ALTER TABLE requests ADD COLUMN tool_trim_tokens_saved_est INTEGER")
 
     def close(self) -> None:
         with contextlib.suppress(Exception):
@@ -239,6 +242,7 @@ class Store:
             "latest_user_turn",
             "latest_user_message_index",
             "latest_user_text_block_index",
+            "tool_trim_tokens_saved_est",
             "latency_local_ms",
         )
         values = [record.get(c) for c in columns]
@@ -305,11 +309,12 @@ class Store:
         for r in rows:
             before = int(r["est_tokens_before"] or 0)
             after = int(r["est_tokens_after"] or 0)
+            tool_saved = int(r["tool_trim_tokens_saved_est"] or 0)
             if before:
-                saved = max(0, before - after)
+                saved = max(0, before - after) + tool_saved
                 tokens_saved += saved
                 unit_price = price_per_token(r["model"])
-                cost_before += before * unit_price
+                cost_before += (before + tool_saved) * unit_price
                 cost_after += after * unit_price
                 cost_savings += saved * unit_price
                 if r["mode"] == "prune":
@@ -355,7 +360,7 @@ class Store:
         rows = self._conn.execute(
             "SELECT id, ts, model, mode, status, est_tokens_before, est_tokens_after, "
             "blocks_filtered, input_tokens, cache_read_tokens, cache_write_tokens, "
-            "output_tokens, relative_input_cost, note "
+            "output_tokens, relative_input_cost, note, tool_trim_tokens_saved_est "
             "FROM requests ORDER BY ts DESC LIMIT ?",
             (limit,),
         ).fetchall()

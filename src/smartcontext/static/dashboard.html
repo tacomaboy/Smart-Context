@@ -488,10 +488,11 @@ function promptCostFromUsageUsd(row) {
 
 function rowWithComputedCosts(row) {
   const localSaved = localSavedTokensEst(row);
+  const toolSaved = Number(row.tool_trim_tokens_saved_est || 0);
   const perM = Number(row.est_input_price_per_mtoken_usd || 3);
   const unit = perM / 1_000_000;
   const withSmartContext = promptCostFromUsageUsd(row);
-  const withoutSmartContext = withSmartContext + (localSaved * unit);
+  const withoutSmartContext = withSmartContext + ((localSaved + toolSaved) * unit);
   const savings = Math.max(0, withoutSmartContext - withSmartContext);
   return {
     ...row,
@@ -891,6 +892,7 @@ function render(d) {
     ["Cache write", r => fmt(r.cache_write_tokens)],
     ["Fresh input", r => fmt(r.input_tokens)],
     ["Held locally (est)", r => fmt(localSavedTokensEst(r))],
+    ["Tools trimmed (est)", r => fmt(r.tool_trim_tokens_saved_est || 0)],
     ["Output", r => fmt(r.output_tokens)],
   ]));
   main.appendChild(c1);
