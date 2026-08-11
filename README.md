@@ -119,8 +119,11 @@ macOS:
 
 ### 2) Set your Anthropic API key locally
 
-Set this before you start the proxy so API clients do not fail once traffic is
-routed through it.
+If your Anthropic client already works, you usually do not need to do anything
+here. The proxy forwards your existing auth header upstream.
+
+Set this only if your client/session does not already provide
+`ANTHROPIC_API_KEY`.
 
 PowerShell:
 
