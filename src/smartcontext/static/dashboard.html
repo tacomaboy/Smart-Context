@@ -176,6 +176,7 @@
     background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px;
     width: 100%; max-width: 860px; max-height: 86vh;
     display: flex; flex-direction: column; overflow: hidden;
+    min-height: 0;
     box-shadow: 0 12px 40px rgba(0,0,0,.3);
   }
   .modal-head {
@@ -190,10 +191,14 @@
   }
   .modal-close:hover { color: var(--text-primary); border-color: var(--text-secondary); }
   .modal-body {
+    flex: 1 1 auto;
+    min-height: 0;
     padding: 18px;
     overflow-y: auto;
     overflow-x: hidden;
     overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-gutter: stable both-edges;
   }
 
   /* tooltip ------------------------------------------------------------- */
