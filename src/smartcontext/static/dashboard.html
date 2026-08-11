@@ -1,0 +1,998 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>smart-context</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3CradialGradient id='g' cx='32' cy='30' r='34' gradientUnits='userSpaceOnUse'%3E%3Cstop offset='0%25' stop-color='%232a78d6'/%3E%3Cstop offset='100%25' stop-color='%23000000'/%3E%3C/radialGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='12' fill='url(%23g)'/%3E%3Ctext x='32' y='41' text-anchor='middle' font-family='Segoe UI, Arial, sans-serif' font-size='24' font-weight='700' fill='white'%3ES/C%3C/text%3E%3C/svg%3E">
+<style>
+  :root {
+    color-scheme: light;
+    --plane:          #f9f9f7;
+    --surface-1:      #fcfcfb;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #898781;
+    --grid:           #e1e0d9;
+    --axis:           #c3c2b7;
+    --border:         rgba(11,11,11,0.10);
+    --series-1:       #2a78d6;  /* cache read  */
+    --series-2:       #eb6834;  /* cache write */
+    --series-3:       #1baf7a;  /* fresh input */
+    --series-4:       #b8860b;  /* local held (est) */
+    --before:         #86b6ef;
+    --after:          #2a78d6;
+    --good:           #0ca30c;
+    --critical:       #d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --plane:          #0d0d0d;
+      --surface-1:      #1a1a19;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted:     #898781;
+      --grid:           #2c2c2a;
+      --axis:           #383835;
+      --border:         rgba(255,255,255,0.10);
+      --series-1:       #3987e5;
+      --series-2:       #d95926;
+      --series-3:       #199e70;
+      --series-4:       #ffd166;
+      --before:         #9ec5f4;
+      --after:          #3987e5;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --plane:          #0d0d0d;
+    --surface-1:      #1a1a19;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #898781;
+    --grid:           #2c2c2a;
+    --axis:           #383835;
+    --border:         rgba(255,255,255,0.10);
+    --series-1:       #3987e5;
+    --series-2:       #d95926;
+    --series-3:       #199e70;
+    --series-4:       #ffd166;
+    --before:         #9ec5f4;
+    --after:          #3987e5;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 32px 24px 64px;
+    background: var(--plane);
+    color: var(--text-primary);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; }
+
+  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
+  h1 { font-size: 18px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+  .sub { color: var(--text-secondary); font-size: 13px; margin: 0 0 28px; }
+
+  .badge {
+    font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
+    padding: 3px 8px; border-radius: 999px; border: 1px solid var(--border);
+    color: var(--text-secondary);
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+
+  .btn {
+    font-size: 11px; font-weight: 600; letter-spacing: .02em;
+    padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border);
+    background: var(--surface-1); color: var(--text-secondary);
+    cursor: pointer; margin-left: auto;
+  }
+  .btn:hover { color: var(--text-primary); border-color: var(--text-secondary); }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .btn.icon { width: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+
+  #theme-btn { margin-left: auto; min-width: 88px; }
+  #cost-help-btn { margin-left: 0; }
+  #reset-btn { margin-left: 0; }
+
+  .card {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 22px;
+  }
+
+  /* hero ---------------------------------------------------------------- */
+  .hero { display: flex; gap: 36px; align-items: flex-start; flex-wrap: wrap; margin-bottom: 20px; }
+  .hero-fig { font-size: 56px; font-weight: 600; line-height: 1; letter-spacing: -0.02em; }
+  .hero-label { color: var(--text-secondary); font-size: 13px; margin-top: 8px; max-width: 30ch; }
+
+  /* kpi ----------------------------------------------------------------- */
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; margin-bottom: 26px; }
+  .kpi-label { color: var(--text-secondary); font-size: 12px; margin-bottom: 8px; }
+  .kpi-value { font-size: 26px; font-weight: 600; letter-spacing: -0.01em; }
+  .kpi-note { color: var(--text-muted); font-size: 11px; margin-top: 6px; }
+
+  /* charts -------------------------------------------------------------- */
+  .chart-card { margin-bottom: 22px; }
+  .chart-head { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; flex-wrap: wrap; margin-bottom: 4px; }
+  h2 { font-size: 14px; font-weight: 600; margin: 0; }
+  .chart-sub { color: var(--text-secondary); font-size: 12px; margin: 0 0 16px; }
+  .scroll { overflow-x: auto; }
+  svg { display: block; }
+  .legend { display: flex; gap: 18px; flex-wrap: wrap; margin-bottom: 14px; }
+  .legend span { display: inline-flex; align-items: center; color: var(--text-secondary); font-size: 12px; }
+  .tick { fill: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .gridline { stroke: var(--grid); stroke-width: 1; }
+  .baseline { stroke: var(--axis); stroke-width: 1; }
+  .dlabel { fill: var(--text-secondary); font-size: 11px; font-variant-numeric: tabular-nums; }
+
+  /* table --------------------------------------------------------------- */
+  details { margin-top: 8px; }
+  summary { cursor: pointer; color: var(--text-secondary); font-size: 12px; }
+  table { border-collapse: collapse; width: 100%; margin-top: 12px; font-size: 12px; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 6px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; font-variant-numeric: normal; }
+  th { color: var(--text-secondary); font-weight: 600; }
+  .req-table td:last-child, .req-table th:last-child { text-align: right; }
+  .inspect-btn {
+    font-size: 11px; font-weight: 600; letter-spacing: .02em;
+    padding: 5px 10px; border-radius: 999px; border: 1px solid var(--border);
+    background: var(--plane); color: var(--text-primary); cursor: pointer;
+  }
+  .inspect-btn:hover { border-color: var(--text-secondary); }
+  .detail-shell { display: grid; gap: 14px; margin-top: 16px; }
+  .detail-meta { display: flex; gap: 10px; flex-wrap: wrap; color: var(--text-secondary); font-size: 12px; }
+  .detail-meta span { padding: 3px 8px; border: 1px solid var(--border); border-radius: 999px; }
+  .diff-block {
+    border: 1px solid var(--border); border-radius: 10px; overflow: hidden;
+    background: var(--plane);
+  }
+  .diff-head {
+    display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+    padding: 10px 12px; border-bottom: 1px solid var(--border); background: var(--surface-1);
+    color: var(--text-secondary); font-size: 12px;
+  }
+  .diff-pre {
+    margin: 0; padding: 12px; overflow: auto; max-height: 420px;
+    font: 12px/1.5 Consolas, "SFMono-Regular", Menlo, monospace;
+    overscroll-behavior: contain;
+  }
+  .diff-line { display: block; white-space: pre-wrap; word-break: break-word; }
+  .diff-line.same { color: var(--text-secondary); }
+  .diff-line.removed { color: var(--critical); background: color-mix(in srgb, var(--critical) 8%, transparent); }
+  .diff-line.added { color: var(--good); background: color-mix(in srgb, var(--good) 10%, transparent); }
+  .detail-empty { color: var(--text-secondary); font-size: 12px; }
+
+  /* modal ----------------------------------------------------------------- */
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,.5);
+    display: flex; align-items: center; justify-content: center;
+    padding: 24px; z-index: 100;
+  }
+  .modal-backdrop[hidden] { display: none; }
+  .modal-panel {
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px;
+    width: 100%; max-width: 860px; max-height: 86vh;
+    display: flex; flex-direction: column; overflow: hidden;
+    box-shadow: 0 12px 40px rgba(0,0,0,.3);
+  }
+  .modal-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 14px 18px; border-bottom: 1px solid var(--border); flex: none;
+  }
+  .modal-head h2 { font-size: 14px; }
+  .modal-close {
+    background: none; border: 1px solid var(--border); border-radius: 999px;
+    width: 28px; height: 28px; color: var(--text-secondary); cursor: pointer; font-size: 14px;
+    display: flex; align-items: center; justify-content: center; flex: none;
+  }
+  .modal-close:hover { color: var(--text-primary); border-color: var(--text-secondary); }
+  .modal-body { padding: 18px; overflow: auto; overscroll-behavior: contain; }
+
+  /* tooltip ------------------------------------------------------------- */
+  #tip {
+    position: fixed; pointer-events: none; opacity: 0; transition: opacity .1s;
+    background: var(--surface-1); color: var(--text-primary);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 9px 11px; font-size: 12px; z-index: 50;
+    box-shadow: 0 4px 16px rgba(0,0,0,.14); font-variant-numeric: tabular-nums;
+    max-width: 260px;
+  }
+  #tip b { font-weight: 600; }
+
+  .empty { color: var(--text-secondary); padding: 26px 0; }
+  .empty code { background: var(--plane); padding: 2px 6px; border-radius: 4px; border: 1px solid var(--border); }
+  #main { transition: opacity .15s; }
+  #main.stale { opacity: .55; }
+  .footnote { color: var(--text-muted); font-size: 11px; margin-top: 26px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>smart-context</h1>
+    <span class="badge" id="mode-badge">—</span>
+    <span class="badge" id="model-badge">—</span>
+    <button class="btn" id="theme-btn" title="Switch dashboard theme">Theme: Auto</button>
+    <button class="btn icon" id="cost-help-btn" title="How cache billing and cost calculations work" aria-label="Cost help">?</button>
+    <button class="btn" id="reset-btn" title="Clear logged request history. Stored/recallable chunks are kept unless Shift-clicked.">Reset stats</button>
+  </header>
+  <p class="sub">Local context held versus context actually sent to the Claude API.</p>
+
+  <div id="main"></div>
+
+  <p class="footnote">
+    Token counts for sent context are exact, taken from each response's <code>usage</code> object.
+    The prompt-token chart shows input-side prompt tokens only: cache read, cache write, and fresh
+    input. Prompt-cost calculations use Anthropic input list price for the logged request's model family
+    (<code>haiku</code> $1/M, <code>sonnet</code> $3/M, <code>opus</code> $5/M, <code>fable</code> $10/M input tokens).
+    Cost with smart-context uses observed usage-token composition (fresh 1x, cache-read 0.1x,
+    cache-write 1.25x). The without-smart-context comparison and local-held totals are modeled from
+    local chunk sizing, so they remain directional. Output-token billing is excluded. Refreshes every 5s.
+  </p>
+</div>
+<div id="tip" role="tooltip"></div>
+
+<div id="modal-backdrop" class="modal-backdrop" hidden>
+  <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal-head">
+      <h2 id="modal-title">Request detail</h2>
+      <button class="modal-close" id="modal-close" aria-label="Close">✕</button>
+    </div>
+    <div class="modal-body detail-shell" id="request-detail"></div>
+  </div>
+</div>
+
+<script>
+const fmt  = n => n == null ? "—" : n.toLocaleString();
+const kfmt = n => {
+  if (n == null) return "—";
+  if (n >= 1e9) return (n/1e9).toFixed(1) + "B";
+  if (n >= 1e6) return (n/1e6).toFixed(1) + "M";
+  if (n >= 1e3) return (n/1e3).toFixed(1) + "K";
+  return String(n);
+};
+const pct = v => v == null ? "—" : (v*100).toFixed(1) + "%";
+const usd = v => v == null ? "—" : "$" + v.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+const ms  = v => v == null ? "—" : v < 1000 ? Math.round(v) + " ms" : (v/1000).toFixed(1) + " s";
+let selectedRequestId = null;
+const THEME_KEY = "smartcontext-dashboard-theme";
+const THEME_MODES = ["auto", "light", "dark"];
+
+function applyTheme(mode) {
+  const root = document.documentElement;
+  const btn = document.getElementById("theme-btn");
+  const effective = THEME_MODES.includes(mode) ? mode : "auto";
+  if (effective === "auto") root.removeAttribute("data-theme");
+  else root.setAttribute("data-theme", effective);
+  if (btn) btn.textContent = `Theme: ${effective[0].toUpperCase()}${effective.slice(1)}`;
+  try { localStorage.setItem(THEME_KEY, effective); } catch (_) {}
+}
+
+function initTheme() {
+  let saved = "auto";
+  try { saved = localStorage.getItem(THEME_KEY) || "auto"; } catch (_) {}
+  applyTheme(saved);
+}
+
+function cycleTheme() {
+  const current = document.documentElement.getAttribute("data-theme") || "auto";
+  const idx = THEME_MODES.indexOf(current);
+  const next = THEME_MODES[(idx + 1) % THEME_MODES.length];
+  applyTheme(next);
+}
+
+const tip = document.getElementById("tip");
+function showTip(evt, html) {
+  tip.innerHTML = html;
+  tip.style.opacity = "1";
+  const pad = 14, r = tip.getBoundingClientRect();
+  let x = evt.clientX + pad, y = evt.clientY + pad;
+  if (x + r.width  > innerWidth  - 8) x = evt.clientX - r.width  - pad;
+  if (y + r.height > innerHeight - 8) y = evt.clientY - r.height - pad;
+  tip.style.left = x + "px";
+  tip.style.top  = y + "px";
+}
+const hideTip = () => { tip.style.opacity = "0"; };
+
+const escapeHtml = s => String(s ?? "")
+  .replaceAll("&", "&amp;")
+  .replaceAll("<", "&lt;")
+  .replaceAll(">", "&gt;");
+
+function diffRows(before, after, limit = 1200) {
+  const beforeLines = String(before || "").split("\n");
+  const afterLines = String(after || "").split("\n");
+  let start = 0;
+  while (
+    start < beforeLines.length &&
+    start < afterLines.length &&
+    beforeLines[start] === afterLines[start]
+  ) start += 1;
+
+  let endBefore = beforeLines.length - 1;
+  let endAfter = afterLines.length - 1;
+  while (
+    endBefore >= start &&
+    endAfter >= start &&
+    beforeLines[endBefore] === afterLines[endAfter]
+  ) {
+    endBefore -= 1;
+    endAfter -= 1;
+  }
+
+  const rows = [];
+  for (let i = 0; i < start; i += 1) rows.push({ kind: "same", text: beforeLines[i] });
+  for (let i = start; i <= endBefore; i += 1) rows.push({ kind: "removed", text: beforeLines[i] });
+  for (let i = start; i <= endAfter; i += 1) rows.push({ kind: "added", text: afterLines[i] });
+  for (let i = endBefore + 1, j = endAfter + 1; i < beforeLines.length && j < afterLines.length; i += 1, j += 1) {
+    rows.push({ kind: "same", text: beforeLines[i] });
+  }
+
+  const truncated = rows.length > limit;
+  return {
+    rows: truncated ? rows.slice(0, limit) : rows,
+    truncated,
+    total: rows.length,
+  };
+}
+
+function renderDiff(block, injectedAddedLines = []) {
+  const diff = diffRows(block.before_text, block.after_text);
+  const handleText = (block.handles || []).length ? block.handles.join(", ") : "none";
+  const injected = (injectedAddedLines || []).map(line => `<span class="diff-line added">+ ${escapeHtml(line)}</span>`).join("");
+  return `<div class="diff-block">
+    <div class="diff-head">
+      <span>message ${block.message_index}, block ${block.block_index}${block.tool_use_id ? ` · ${block.tool_use_id}` : ""}</span>
+      <span>${fmt(block.before_tokens_est)} → ${fmt(block.after_tokens_est)} est. tokens</span>
+    </div>
+    <pre class="diff-pre">${injected}${diff.rows.map(row => `<span class="diff-line ${row.kind}">${row.kind === "removed" ? "- " : row.kind === "added" ? "+ " : "  "}${escapeHtml(row.text)}</span>`).join("")}${diff.truncated ? `\n<span class="diff-line same">  … trimmed display after ${fmt(diff.total)} diff lines</span>` : ""}</pre>
+    <div class="diff-head"><span>Recall handles: ${escapeHtml(handleText)}</span><span>Sent text includes the footer shown in green.</span></div>
+  </div>`;
+}
+
+function renderUserTurnBlock(messageIndex, blockIndex, lines) {
+  const m = messageIndex == null ? "?" : messageIndex;
+  const b = blockIndex == null ? "?" : blockIndex;
+  return `<div class="diff-block">
+    <div class="diff-head"><span>message ${m}, block ${b} · user text</span><span>captured at send time</span></div>
+    <pre class="diff-pre">${lines.map(line => `<span class="diff-line added">+ ${escapeHtml(line)}</span>`).join("")}</pre>
+    <div class="diff-head"><span>This block was not trimmed.</span><span>Shown inline for turn context.</span></div>
+  </div>`;
+}
+
+function openModal(title) {
+  if (title) document.getElementById("modal-title").textContent = title;
+  document.getElementById("modal-backdrop").hidden = false;
+}
+function closeModal() {
+  document.getElementById("modal-backdrop").hidden = true;
+  selectedRequestId = null;
+}
+document.getElementById("modal-close").addEventListener("click", closeModal);
+document.getElementById("modal-backdrop").addEventListener("click", evt => {
+  if (evt.target.id === "modal-backdrop") closeModal();
+});
+document.addEventListener("keydown", evt => {
+  if (evt.key === "Escape" && !document.getElementById("modal-backdrop").hidden) closeModal();
+});
+
+async function loadRequestDetail(id) {
+  selectedRequestId = id;
+  const panel = document.getElementById("request-detail");
+  if (!panel) return;
+  openModal(`Request ${fmt(id)}`);
+  panel.innerHTML = `<div class="detail-empty">Loading request ${fmt(id)}…</div>`;
+  try {
+    const resp = await fetch(`/_smartcontext/requests/${id}`, { cache: "no-store" });
+    if (!resp.ok) throw new Error(String(resp.status));
+    const req = await resp.json();
+    const prunes = req.prunes || [];
+    const userTurn = String(req.latest_user_turn || "").trim();
+    const latestMsgIndex = req.latest_user_message_index;
+    const latestTextBlockIndex = req.latest_user_text_block_index;
+    const newTurnLines = userTurn
+      ? String(userTurn).split("\n").map(part => `[user] ${part}`)
+      : [];
+
+    let injected = false;
+    const sections = prunes.map(block => ({
+      message_index: Number(block.message_index),
+      block_index: Number(block.block_index),
+      html: "",
+    }));
+
+    for (let i = 0; i < prunes.length; i += 1) {
+      const block = prunes[i];
+      if (!newTurnLines.length || injected) {
+        sections[i].html = renderDiff(block);
+        continue;
+      }
+      const sameMessage = latestMsgIndex != null && block.message_index === latestMsgIndex;
+      const sameBlock = latestTextBlockIndex == null || block.block_index === latestTextBlockIndex;
+      if (sameMessage && sameBlock) {
+        injected = true;
+        sections[i].html = renderDiff(block, newTurnLines);
+      } else {
+        sections[i].html = renderDiff(block);
+      }
+    }
+
+    if (newTurnLines.length && !injected) {
+      const synthetic = {
+        message_index: Number(latestMsgIndex ?? Number.MAX_SAFE_INTEGER),
+        block_index: Number(latestTextBlockIndex ?? Number.MAX_SAFE_INTEGER),
+        html: renderUserTurnBlock(latestMsgIndex, latestTextBlockIndex, newTurnLines),
+      };
+      sections.push(synthetic);
+      sections.sort((a, b) => (a.message_index - b.message_index) || (a.block_index - b.block_index));
+    }
+
+    const renderedPrunes = sections.map(s => s.html);
+
+    panel.innerHTML = `
+      <div class="detail-meta">
+        <span>Request ${fmt(req.id)}</span>
+        <span>${new Date(req.ts * 1000).toLocaleString()}</span>
+        <span>${escapeHtml(req.model || "unknown model")}</span>
+        <span>${escapeHtml(req.mode || "unknown mode")}</span>
+        <span>${fmt(req.blocks_filtered || 0)} block(s) filtered</span>
+      </div>
+      ${renderedPrunes.length ? renderedPrunes.join("") : `<div class="detail-empty">This request did not save any prune snapshots.</div>`}`;
+  } catch (err) {
+    panel.innerHTML = `<div class="detail-empty">Could not load request ${fmt(id)}.</div>`;
+  }
+}
+
+function promptCostFromUsageUsd(row) {
+  const perM = Number(row.est_input_price_per_mtoken_usd || 3);
+  const unit = perM / 1_000_000;
+  const fresh = Number(row.input_tokens || 0);
+  const cacheRead = Number(row.cache_read_tokens || 0);
+  const cacheWrite = Number(row.cache_write_tokens || 0);
+  // Prompt-input billing proxy: fresh 1x, cache read 0.1x, cache write 1.25x.
+  return unit * (fresh + (cacheRead * 0.1) + (cacheWrite * 1.25));
+}
+
+function rowWithComputedCosts(row) {
+  const localSaved = localSavedTokensEst(row);
+  const perM = Number(row.est_input_price_per_mtoken_usd || 3);
+  const unit = perM / 1_000_000;
+  const withSmartContext = promptCostFromUsageUsd(row);
+  const withoutSmartContext = withSmartContext + (localSaved * unit);
+  const savings = Math.max(0, withoutSmartContext - withSmartContext);
+  return {
+    ...row,
+    prompt_cost_with_usd: withSmartContext,
+    prompt_cost_without_usd: withoutSmartContext,
+    prompt_cost_saved_usd: savings,
+    prompt_cost_saved_pct: withoutSmartContext ? (savings / withoutSmartContext) : 0,
+  };
+}
+
+function summarizePromptCosts(rows) {
+  let withCost = 0;
+  let withoutCost = 0;
+  for (const row of rows) {
+    withCost += Number(row.prompt_cost_with_usd || 0);
+    withoutCost += Number(row.prompt_cost_without_usd || 0);
+  }
+  const savings = Math.max(0, withoutCost - withCost);
+  return {
+    withCost,
+    withoutCost,
+    savings,
+    savingsPct: withoutCost ? savings / withoutCost : 0,
+  };
+}
+
+function openCostHelpModal() {
+  const panel = document.getElementById("request-detail");
+  if (!panel) return;
+  panel.innerHTML = `
+    <div class="card">
+      <div class="kpi-label">What “billed at 0.1x” means</div>
+      <p>Cache read input tokens are charged at one tenth of normal input token price. If your model is $3/M input, cached reads are effectively $0.30/M.</p>
+      <p>Cache writes are charged above base input price. Anthropic pricing is 1.25x for 5-minute cache and 2x for 1-hour cache.</p>
+      <div class="kpi-label">How the dashboard computes cost</div>
+      <p>The prompt-token composition chart uses exact prompt usage from Anthropic responses: fresh input, cache read, and cache write.</p>
+      <p>The dollar charts use each request's logged upstream model tier automatically and compute prompt-input cost from observed usage tokens: fresh × 1.0, cache-read × 0.1, cache-write × 1.25.</p>
+      <p>The “without smart-context” comparison adds locally held tokens back as fresh-input equivalents. That part is modeled (not directly billed data), but model pricing is automatic.</p>
+      <p>These are still not invoice totals. Real billed cost can differ based on cache TTL behavior and output-token charges.</p>
+    </div>`;
+  selectedRequestId = null;
+  openModal("How cache billing and cost calculations work");
+}
+
+/* A rect with only its top corners rounded: the data-end is rounded, the
+   baseline end stays square. */
+function topRoundedPath(x, y, w, h, r) {
+  if (h <= 0) return "";
+  r = Math.max(0, Math.min(r, h, w / 2));
+  return `M${x},${y+h} L${x},${y+r} Q${x},${y} ${x+r},${y} L${x+w-r},${y} `
+       + `Q${x+w},${y} ${x+w},${y+r} L${x+w},${y+h} Z`;
+}
+
+function niceTicks(max, count = 4) {
+  if (max <= 0) return [0];
+  const raw  = max / count;
+  const mag  = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= raw) || mag * 10;
+  const out = [];
+  for (let v = 0; v <= max + step * 0.001; v += step) out.push(Math.round(v));
+  return out;
+}
+
+const SVG = "http://www.w3.org/2000/svg";
+const el = (name, attrs = {}) => {
+  const node = document.createElementNS(SVG, name);
+  for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+  return node;
+};
+
+/* ---------------------------------------------------------------- charts */
+
+const STACK = [
+  { key: "cache_read_tokens",  label: "Cache read",  css: "--series-1", note: "billed at 0.1x" },
+  { key: "cache_write_tokens", label: "Cache write", css: "--series-2", note: "billed at 1.25x" },
+  { key: "input_tokens",       label: "Fresh input", css: "--series-3", note: "billed at 1x" },
+];
+
+function localSavedTokensEst(row) {
+  const before = Number(row.est_tokens_before || 0);
+  const after = Number(row.est_tokens_after || 0);
+  return Math.max(0, before - after);
+}
+
+function stackedChart(rows) {
+  const displayRows = rows.slice().reverse();
+  const W = Math.max(640, rows.length * 34 + 90), H = 260;
+  const M = { top: 12, right: 16, bottom: 34, left: 62 };
+  const pw = W - M.left - M.right, ph = H - M.top - M.bottom;
+
+  const sentTotals = displayRows.map(r => STACK.reduce((s, d) => s + (r[d.key] || 0), 0));
+  const localSaved = displayRows.map(r => localSavedTokensEst(r));
+  const totals = sentTotals.map((t, i) => t + localSaved[i]);
+  const max = Math.max(1, ...totals);
+  const ticks = niceTicks(max);
+  const top = ticks[ticks.length - 1];
+  const y = v => M.top + ph - (v / top) * ph;
+
+  const band = pw / displayRows.length;
+  const bw = Math.min(24, band * 0.62);
+
+  const svg = el("svg", { width: W, height: H, role: "img" });
+
+  ticks.forEach(t => {
+    svg.appendChild(el("line", {
+      class: t === 0 ? "baseline" : "gridline",
+      x1: M.left, x2: M.left + pw, y1: y(t), y2: y(t),
+    }));
+    const lab = el("text", { class: "tick", x: M.left - 10, y: y(t) + 4, "text-anchor": "end" });
+    lab.textContent = kfmt(t);
+    svg.appendChild(lab);
+  });
+
+  displayRows.forEach((r, i) => {
+    const cx = M.left + band * i + band / 2 - bw / 2;
+    let cursor = 0;
+    const sentTotal = sentTotals[i];
+    const localHeld = localSaved[i];
+    const total = totals[i];
+
+    // Draw top-down so the topmost drawn segment carries the rounded end.
+    const segs = STACK.map(d => ({ ...d, value: r[d.key] || 0 })).filter(s => s.value > 0);
+    if (localHeld > 0) {
+      segs.push({
+        key: "local_saved_tokens_est",
+        label: "Held locally (est)",
+        css: "--series-4",
+        value: localHeld,
+      });
+    }
+    segs.forEach((s, idx) => {
+      const h = (s.value / top) * ph;
+      const yTop = y(cursor + s.value);
+      // 2px surface gap between touching segments (never a border stroke).
+      const gap = idx < segs.length - 1 ? 2 : 0;
+      const isTopMost = idx === segs.length - 1;
+      const drawH = Math.max(0, h - gap);
+      const path = el("path", {
+        d: isTopMost
+          ? topRoundedPath(cx, yTop, bw, drawH, 4)
+          : topRoundedPath(cx, yTop + gap, bw, drawH, 0),
+        fill: `var(${s.css})`,
+      });
+      svg.appendChild(path);
+      cursor += s.value;
+    });
+
+    // Hit target spans the whole band, so hovering never demands precision.
+    const hit = el("rect", {
+      x: M.left + band * i, y: M.top, width: band, height: ph,
+      fill: "transparent", style: "cursor:crosshair",
+    });
+    const when = new Date(r.ts * 1000).toLocaleTimeString();
+    const lines = STACK.map(d =>
+      `<div><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(${d.css});margin-right:6px"></span>${d.label}: <b>${fmt(r[d.key] || 0)}</b></div>`
+    ).join("");
+    const localLine = localHeld > 0
+      ? `<div><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--series-4);margin-right:6px"></span>Held locally (est): <b>${fmt(localHeld)}</b></div>`
+      : "";
+    hit.addEventListener("mousemove", e => showTip(e,
+        `<b>${r.model || "request"}</b><br><span style="color:var(--text-muted)">${when} · ${r.mode}</span><br><br>${lines}${localLine}<div style="margin-top:6px">Sent prompt total: <b>${fmt(sentTotal)}</b></div><div style="margin-top:2px">Without smart-context (est): <b>${fmt(total)}</b></div><div style="margin-top:4px;color:var(--text-muted)">Prompt-side only. Local-held segment is estimated.</div>`));
+    hit.addEventListener("mouseleave", hideTip);
+    svg.appendChild(hit);
+  });
+
+  // Label only the final column -- never a number on every mark.
+  if (displayRows.length) {
+    const lastTotal = totals[totals.length - 1];
+    const cx = M.left + band * (displayRows.length - 1) + band / 2;
+    const lab = el("text", {
+      class: "dlabel", x: cx, y: Math.max(M.top + 10, y(lastTotal) - 8), "text-anchor": "middle",
+    });
+    lab.textContent = kfmt(lastTotal);
+    svg.appendChild(lab);
+  }
+
+  const axis = el("text", { class: "tick", x: M.left, y: H - 10 });
+  axis.textContent = "newest";
+  svg.appendChild(axis);
+  const axis2 = el("text", { class: "tick", x: M.left + pw, y: H - 10, "text-anchor": "end" });
+  axis2.textContent = "oldest";
+  svg.appendChild(axis2);
+
+  return svg;
+}
+
+function dumbbellChart(rows) {
+  const displayRows = rows.slice().reverse();
+  const rowH = 26, H = rows.length * rowH + 46;
+  const W = 640, M = { top: 10, right: 64, bottom: 30, left: 62 };
+  const pw = W - M.left - M.right;
+  const max = Math.max(1, ...displayRows.map(r => r.est_tokens_before || 0));
+  const ticks = niceTicks(max);
+  const top = ticks[ticks.length - 1];
+  const x = v => M.left + (v / top) * pw;
+
+  const svg = el("svg", { width: W, height: H, role: "img", style: "width:100%;max-width:" + W + "px" });
+
+  ticks.forEach(t => {
+    svg.appendChild(el("line", {
+      class: t === 0 ? "baseline" : "gridline",
+      x1: x(t), x2: x(t), y1: M.top, y2: M.top + rows.length * rowH,
+    }));
+    const lab = el("text", { class: "tick", x: x(t), y: H - 12, "text-anchor": "middle" });
+    lab.textContent = kfmt(t);
+    svg.appendChild(lab);
+  });
+
+  displayRows.forEach((r, i) => {
+    const cy = M.top + i * rowH + rowH / 2;
+    const before = r.est_tokens_before || 0, after = r.est_tokens_after || 0;
+
+    svg.appendChild(el("line", {
+      x1: x(after), x2: x(before), y1: cy, y2: cy,
+      stroke: "var(--axis)", "stroke-width": 2, "stroke-linecap": "round",
+    }));
+    // 2px surface ring keeps the dots legible where they nearly overlap.
+    [["--before", before], ["--after", after]].forEach(([css, v]) => {
+      svg.appendChild(el("circle", {
+        cx: x(v), cy, r: 5, fill: `var(${css})`,
+        stroke: "var(--surface-1)", "stroke-width": 2,
+      }));
+    });
+
+    const cut = before ? 1 - after / before : 0;
+    const lab = el("text", { class: "dlabel", x: M.left + pw + 8, y: cy + 4 });
+    lab.textContent = "−" + (cut * 100).toFixed(0) + "%";
+    svg.appendChild(lab);
+
+    const hit = el("rect", {
+      x: M.left, y: cy - rowH / 2, width: pw, height: rowH,
+      fill: "transparent", style: "cursor:crosshair",
+    });
+    hit.addEventListener("mousemove", e => showTip(e,
+      `<b>${r.model || "request"}</b><br><span style="color:var(--text-muted)">${new Date(r.ts*1000).toLocaleTimeString()}</span><br><br>` +
+      `Held locally: <b>${fmt(before)}</b><br>Sent to Claude: <b>${fmt(after)}</b><br>` +
+      `Reduction: <b>${(cut*100).toFixed(1)}%</b><br>` +
+      `<span style="color:var(--text-muted)">${r.blocks_filtered} block(s) filtered</span>`));
+    hit.addEventListener("mouseleave", hideTip);
+    svg.appendChild(hit);
+  });
+
+  return svg;
+}
+
+function costDumbbellChart(rows) {
+  const displayRows = rows.slice().reverse();
+  const rowH = 26, H = rows.length * rowH + 46;
+  const W = 640, M = { top: 10, right: 64, bottom: 30, left: 62 };
+  const pw = W - M.left - M.right;
+  const max = Math.max(0.0001, ...displayRows.map(r => Math.max(r.prompt_cost_without_usd || 0, r.prompt_cost_with_usd || 0)));
+  const ticks = niceTicks(max, 5);
+  const top = ticks[ticks.length - 1] || max;
+  const x = v => M.left + (v / top) * pw;
+
+  const svg = el("svg", { width: W, height: H, role: "img", style: "width:100%;max-width:" + W + "px" });
+
+  ticks.forEach(t => {
+    svg.appendChild(el("line", {
+      class: t === 0 ? "baseline" : "gridline",
+      x1: x(t), x2: x(t), y1: M.top, y2: M.top + rows.length * rowH,
+    }));
+    const lab = el("text", { class: "tick", x: x(t), y: H - 12, "text-anchor": "middle" });
+    lab.textContent = usd(t);
+    svg.appendChild(lab);
+  });
+
+  displayRows.forEach((r, i) => {
+    const cy = M.top + i * rowH + rowH / 2;
+    const before = r.prompt_cost_without_usd || 0;
+    const after = r.prompt_cost_with_usd || 0;
+
+    svg.appendChild(el("line", {
+      x1: x(after), x2: x(before), y1: cy, y2: cy,
+      stroke: "var(--axis)", "stroke-width": 2, "stroke-linecap": "round",
+    }));
+    [["--before", before], ["--after", after]].forEach(([css, v]) => {
+      svg.appendChild(el("circle", {
+        cx: x(v), cy, r: 5, fill: `var(${css})`,
+        stroke: "var(--surface-1)", "stroke-width": 2,
+      }));
+    });
+
+    const save = before ? 1 - after / before : 0;
+    const lab = el("text", { class: "dlabel", x: M.left + pw + 8, y: cy + 4 });
+    lab.textContent = "−" + (save * 100).toFixed(0) + "%";
+    svg.appendChild(lab);
+
+    const hit = el("rect", {
+      x: M.left, y: cy - rowH / 2, width: pw, height: rowH,
+      fill: "transparent", style: "cursor:crosshair",
+    });
+    hit.addEventListener("mousemove", e => showTip(e,
+      `<b>${r.model || "request"}</b><br><span style="color:var(--text-muted)">${new Date(r.ts*1000).toLocaleTimeString()}</span><br><br>` +
+      `Without smart-context: <b>${usd(before)}</b><br>With smart-context: <b>${usd(after)}</b><br>` +
+      `Saved: <b>${usd(r.prompt_cost_saved_usd || 0)}</b> (${(save*100).toFixed(1)}%)<br>` +
+      `<span style="color:var(--text-muted)">${r.est_price_family || "sonnet"} list price · $${(r.est_input_price_per_mtoken_usd || 0).toFixed(2)}/M input tokens</span>`));
+    hit.addEventListener("mouseleave", hideTip);
+    svg.appendChild(hit);
+  });
+
+  return svg;
+}
+
+function legend(items) {
+  const div = document.createElement("div");
+  div.className = "legend";
+  div.innerHTML = items.map(i =>
+    `<span><i class="dot" style="background:var(${i.css})"></i>${i.label}${i.note ? ` <span style="color:var(--text-muted);margin-left:4px">${i.note}</span>` : ""}</span>`
+  ).join("");
+  return div;
+}
+
+/* ------------------------------------------------------------------ page */
+
+function render(d) {
+  const main = document.getElementById("main");
+  const s = d.stats || {};
+
+  document.getElementById("mode-badge").textContent = d.mode === "prune" ? "pruning" : "shadow — measuring only";
+  const mb = document.getElementById("model-badge");
+  mb.innerHTML = `<i class="dot" style="background:${d.local_model_available ? "var(--good)" : "var(--critical)"}"></i>`
+               + (d.local_model_available ? d.local_model : d.local_model + " unreachable");
+
+  if (!s.requests) {
+    main.innerHTML = `<div class="card empty">
+      <p>No requests recorded yet.</p>
+      <p>Point a client at this proxy and make a call:</p>
+      <p><code>$env:ANTHROPIC_BASE_URL = "http://127.0.0.1:4711"</code></p>
+    </div>`;
+    return;
+  }
+
+  main.innerHTML = "";
+
+  // Hero -- exactly one per view.
+  const hero = document.createElement("div");
+  hero.className = "card hero";
+  const mult = d.effective_multiplier;
+  hero.innerHTML = `
+    <div>
+      <div class="hero-fig">${mult ? mult.toFixed(2) + "×" : "1.00×"}</div>
+      <div class="hero-label">Effective context. The store holds this much more than
+        was sent upstream — ${kfmt(d.elided_tokens_est)} tokens kept locally and
+        recallable, on top of ${kfmt(d.sent_tokens)} sent.</div>
+    </div>`;
+  main.appendChild(hero);
+
+  // KPI row.
+  const rowsRaw = d.timeline || [];
+  const rows = rowsRaw.map(rowWithComputedCosts);
+  const costs = summarizePromptCosts(rows);
+
+  const kpis = document.createElement("div");
+  kpis.className = "kpis";
+  const hit = s.cache_hit_ratio;
+  const kpiData = [
+    { label: "Sent to Claude", value: kfmt(d.sent_tokens), note: "exact, from usage" },
+    { label: "Held locally", value: kfmt(d.elided_tokens_est), note: "estimated, recallable" },
+    { label: "Cache hit ratio", value: pct(hit),
+      note: hit >= 0.5 ? "healthy — prefix is stable"
+          : hit >= 0.2 ? "moderate"
+          : "low — something is invalidating the prefix" },
+    { label: "Requests", value: fmt(s.requests), note: `${fmt(s.blocks_filtered)} blocks filtered` },
+    { label: "Tokens saved", value: kfmt(s.tokens_saved), note: "before vs. after pruning, estimated" },
+    { label: "Context reduced", value: pct(s.avg_reduction_pct), note: "average, across pruned requests" },
+    { label: "Estimated prompt cost", value: usd(costs.withCost), note: `${usd(costs.withoutCost)} without smart-context, modeled` },
+    { label: "Estimated cost savings", value: pct(costs.savingsPct), note: `${usd(costs.savings)} saved` },
+    { label: "Avg. trim time", value: ms(s.avg_trim_time_ms), note: "local model latency per request" },
+  ];
+  kpis.innerHTML = kpiData.map(k => `
+    <div class="card">
+      <div class="kpi-label">${k.label}</div>
+      <div class="kpi-value">${k.value}</div>
+      <div class="kpi-note">${k.note}</div>
+    </div>`).join("");
+  main.appendChild(kpis);
+
+  // Chart 1 -- token composition (part-to-whole over time).
+  const c1 = document.createElement("div");
+  c1.className = "card chart-card";
+  c1.innerHTML = `<div class="chart-head"><h2>Prompt token composition</h2></div>
+    <p class="chart-sub">Each bar is one request over time. Blue/orange/teal are prompt tokens sent to Anthropic. Green on top is estimated tokens kept local by smart-context (what would otherwise have been sent). This is per-request flow, not Anthropic cache-size growth.</p>`;
+  c1.appendChild(legend([
+    ...STACK,
+    { key: "local_saved_tokens_est", label: "Held locally (est)", css: "--series-4", note: "not sent upstream" },
+  ]));
+  const scroll1 = document.createElement("div");
+  scroll1.className = "scroll";
+  scroll1.appendChild(stackedChart(rows));
+  c1.appendChild(scroll1);
+  c1.appendChild(tableView(rows, [
+    ["Time", r => new Date(r.ts*1000).toLocaleTimeString()],
+    ["Model", r => r.model || "—"],
+    ["Price basis", r => `${r.est_price_family || "sonnet"} · $${(r.est_input_price_per_mtoken_usd || 0).toFixed(2)}/M input tokens`],
+    ["Cache read", r => fmt(r.cache_read_tokens)],
+    ["Cache write", r => fmt(r.cache_write_tokens)],
+    ["Fresh input", r => fmt(r.input_tokens)],
+    ["Held locally (est)", r => fmt(localSavedTokensEst(r))],
+    ["Output", r => fmt(r.output_tokens)],
+  ]));
+  main.appendChild(c1);
+
+  // Chart 2 -- before/after per filtered request (dumbbell).
+  const filtered = rows.filter(r => r.blocks_filtered > 0 && r.est_tokens_before);
+  const c2 = document.createElement("div");
+  c2.className = "card chart-card";
+  c2.innerHTML = `<div class="chart-head"><h2>Held locally → sent upstream</h2></div>
+    <p class="chart-sub">${filtered.length
+      ? "Each row is one filtered request: estimated context before filtering, and what was actually sent."
+      : "No filtered requests yet. In shadow mode nothing is removed — start with <code>--mode prune</code> to populate this."}</p>`;
+  if (filtered.length) {
+    c2.appendChild(legend([
+      { css: "--before", label: "Held locally (before)" },
+      { css: "--after",  label: "Sent to Claude (after)" },
+    ]));
+    const scroll2 = document.createElement("div");
+    scroll2.className = "scroll";
+    scroll2.appendChild(dumbbellChart(filtered.slice(-14)));
+    c2.appendChild(scroll2);
+    c2.appendChild(tableView(filtered, [
+      ["Time", r => new Date(r.ts*1000).toLocaleTimeString()],
+      ["Before (est)", r => fmt(r.est_tokens_before)],
+      ["After (est)", r => fmt(r.est_tokens_after)],
+      ["Reduction", r => ((1 - r.est_tokens_after / r.est_tokens_before) * 100).toFixed(1) + "%"],
+      ["Blocks", r => fmt(r.blocks_filtered)],
+    ]));
+  }
+  main.appendChild(c2);
+
+  const cCost = document.createElement("div");
+  cCost.className = "card chart-card";
+  cCost.innerHTML = `<div class="chart-head"><h2>Prompt cost impact</h2></div>
+    <p class="chart-sub">Per request, estimated prompt-input cost without smart-context versus with smart-context, priced from the actual logged upstream model for that request. Uses observed fresh/cache-read/cache-write usage; output-token billing is excluded.</p>`;
+  if (filtered.length) {
+    cCost.appendChild(legend([
+      { css: "--before", label: "Before pruning" },
+      { css: "--after", label: "After pruning" },
+    ]));
+    const scrollCost = document.createElement("div");
+    scrollCost.className = "scroll";
+    scrollCost.appendChild(costDumbbellChart(filtered.slice(-14)));
+    cCost.appendChild(scrollCost);
+    cCost.appendChild(tableView(filtered, [
+      ["Time", r => new Date(r.ts*1000).toLocaleTimeString()],
+      ["Price basis", r => `${r.est_price_family || "sonnet"} · $${(r.est_input_price_per_mtoken_usd || 0).toFixed(2)}/M input tokens`],
+      ["Without smart-context (est.)", r => usd(r.prompt_cost_without_usd)],
+      ["With smart-context (est.)", r => usd(r.prompt_cost_with_usd)],
+      ["Saved (est.)", r => usd(r.prompt_cost_saved_usd)],
+      ["Savings % (est.)", r => pct(r.prompt_cost_saved_pct)],
+    ]));
+  } else {
+    cCost.innerHTML += `<div class="detail-empty">No filtered requests yet.</div>`;
+  }
+  main.appendChild(cCost);
+
+  const c3 = document.createElement("div");
+  c3.className = "card chart-card";
+  const inspectable = rows.filter(r => r.blocks_filtered > 0);
+  c3.innerHTML = `<div class="chart-head"><h2>Request inspector</h2></div>
+    <p class="chart-sub">Open one filtered request to see the saved before/after snapshot for each trimmed block. The diff is text-only and shows what was removed, not a patchable code diff.</p>`;
+  if (inspectable.length) {
+    c3.innerHTML += `<table class="req-table"><thead><tr>
+      <th>Time</th><th>Model</th><th>Before (est)</th><th>After (est)</th><th>Reduction</th><th></th>
+    </tr></thead><tbody>${inspectable.slice().reverse().map(r => `
+      <tr>
+        <td>${new Date(r.ts * 1000).toLocaleTimeString()}</td>
+        <td>${escapeHtml(r.model || "—")}</td>
+        <td>${fmt(r.est_tokens_before)}</td>
+        <td>${fmt(r.est_tokens_after)}</td>
+        <td>${r.est_tokens_before ? pct(1 - r.est_tokens_after / r.est_tokens_before) : "—"}</td>
+        <td><button class="inspect-btn" data-request-id="${r.id}">Inspect</button></td>
+      </tr>`).join("")}</tbody></table>`;
+  } else {
+    c3.innerHTML += `<div class="detail-empty">No filtered requests yet.</div>`;
+  }
+  main.appendChild(c3);
+
+  main.querySelectorAll(".inspect-btn").forEach(btn => {
+    btn.addEventListener("click", () => loadRequestDetail(Number(btn.dataset.requestId)));
+  });
+}
+
+function tableView(rows, cols) {
+  const det = document.createElement("details");
+  det.innerHTML = `<summary>Table view</summary>
+    <table><thead><tr>${cols.map(c => `<th>${c[0]}</th>`).join("")}</tr></thead>
+    <tbody>${rows.slice().reverse().map(r =>
+      `<tr>${cols.map(c => `<td>${c[1](r)}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+  return det;
+}
+
+async function tick() {
+  const main = document.getElementById("main");
+  try {
+    const resp = await fetch("/_smartcontext/dashboard-data", { cache: "no-store" });
+    if (!resp.ok) throw new Error(resp.status);
+    // Hold the previous render at reduced opacity rather than flashing a skeleton.
+    main.classList.remove("stale");
+    render(await resp.json());
+  } catch (e) {
+    main.classList.add("stale");
+  }
+}
+
+document.getElementById("reset-btn").addEventListener("click", async (ev) => {
+  const wipeChunks = ev.shiftKey;
+  const msg = wipeChunks
+    ? "Clear ALL request history AND stored/recallable chunks? This deletes anything a context_recall handle could still fetch."
+    : "Clear logged request history (requests, tokens, cache-hit ratio)? Stored chunks stay recallable. Shift-click to also wipe those.";
+  if (!confirm(msg)) return;
+  const btn = ev.currentTarget;
+  btn.disabled = true;
+  try {
+    const resp = await fetch(`/_smartcontext/reset?wipe_chunks=${wipeChunks}`, { method: "POST" });
+    if (!resp.ok) throw new Error(resp.status);
+    await tick();
+  } catch (e) {
+    alert("Reset failed: " + e);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+document.getElementById("cost-help-btn").addEventListener("click", openCostHelpModal);
+document.getElementById("theme-btn").addEventListener("click", cycleTheme);
+
+initTheme();
+tick();
+setInterval(tick, 5000);
+</script>
+</body>
+</html>
