@@ -355,7 +355,7 @@ class Store:
         rows = self._conn.execute(
             "SELECT id, ts, model, mode, status, est_tokens_before, est_tokens_after, "
             "blocks_filtered, input_tokens, cache_read_tokens, cache_write_tokens, "
-            "output_tokens, relative_input_cost "
+            "output_tokens, relative_input_cost, note "
             "FROM requests ORDER BY ts DESC LIMIT ?",
             (limit,),
         ).fetchall()

@@ -373,6 +373,17 @@ function renderUserTurnBlock(messageIndex, blockIndex, lines) {
   </div>`;
 }
 
+function parseToolsTrimNote(noteText) {
+  const raw = String(noteText || "");
+  const m = raw.match(/tools trimmed\s+(\d+)\s*->\s*(\d+)(?:\s*\(([^)]+)\))?/i);
+  if (!m) return null;
+  return {
+    before: Number(m[1]),
+    after: Number(m[2]),
+    method: m[3] ? String(m[3]) : "",
+  };
+}
+
 function openModal(title) {
   if (title) document.getElementById("modal-title").textContent = title;
   document.getElementById("modal-backdrop").hidden = false;
@@ -400,6 +411,7 @@ async function loadRequestDetail(id) {
     if (!resp.ok) throw new Error(String(resp.status));
     const req = await resp.json();
     const prunes = req.prunes || [];
+    const noteText = String(req.note || "").trim();
     const userTurn = String(req.latest_user_turn || "").trim();
     const latestMsgIndex = req.latest_user_message_index;
     const latestTextBlockIndex = req.latest_user_text_block_index;
@@ -442,6 +454,8 @@ async function loadRequestDetail(id) {
 
     const renderedPrunes = sections.map(s => s.html);
 
+    const toolTrim = parseToolsTrimNote(noteText);
+
     panel.innerHTML = `
       <div class="detail-meta">
         <span>Request ${fmt(req.id)}</span>
@@ -449,8 +463,14 @@ async function loadRequestDetail(id) {
         <span>${escapeHtml(req.model || "unknown model")}</span>
         <span>${escapeHtml(req.mode || "unknown mode")}</span>
         <span>${fmt(req.blocks_filtered || 0)} block(s) filtered</span>
+        ${toolTrim ? `<span>tools ${fmt(toolTrim.before)} -> ${fmt(toolTrim.after)}${toolTrim.method ? ` (${escapeHtml(toolTrim.method)})` : ""}</span>` : ""}
+        ${noteText ? `<span>${escapeHtml(noteText)}</span>` : ""}
       </div>
-      ${renderedPrunes.length ? renderedPrunes.join("") : `<div class="detail-empty">This request did not save any prune snapshots.</div>`}`;
+      ${renderedPrunes.length
+        ? renderedPrunes.join("")
+        : (newTurnLines.length
+            ? `${renderUserTurnBlock(latestMsgIndex, latestTextBlockIndex, newTurnLines)}<div class="detail-empty">${toolTrim ? `No block trims. Tools were trimmed ${fmt(toolTrim.before)} -> ${fmt(toolTrim.after)}${toolTrim.method ? ` (${escapeHtml(toolTrim.method)})` : ""}.` : "This request did not trim any blocks."}</div>`
+            : `<div class="detail-empty">${toolTrim ? `No block trims. Tools were trimmed ${fmt(toolTrim.before)} -> ${fmt(toolTrim.after)}${toolTrim.method ? ` (${escapeHtml(toolTrim.method)})` : ""}.` : "This request did not save any prune snapshots."}</div>`)} `;
   } catch (err) {
     panel.innerHTML = `<div class="detail-empty">Could not load request ${fmt(id)}.</div>`;
   }
@@ -930,23 +950,24 @@ function render(d) {
 
   const c3 = document.createElement("div");
   c3.className = "card chart-card";
-  const inspectable = rows.filter(r => r.blocks_filtered > 0);
   c3.innerHTML = `<div class="chart-head"><h2>Request inspector</h2></div>
-    <p class="chart-sub">Open one filtered request to see the saved before/after snapshot for each trimmed block. The diff is text-only and shows what was removed, not a patchable code diff.</p>`;
-  if (inspectable.length) {
+    <p class="chart-sub">Open any request to inspect what happened. Block trims and tool-catalog trims are both surfaced here.</p>`;
+  if (rows.length) {
     c3.innerHTML += `<table class="req-table"><thead><tr>
-      <th>Time</th><th>Model</th><th>Before (est)</th><th>After (est)</th><th>Reduction</th><th></th>
-    </tr></thead><tbody>${inspectable.slice().reverse().map(r => `
+      <th>Time</th><th>Model</th><th>Before (est)</th><th>After (est)</th><th>Reduction</th><th>Blocks</th><th>Tools</th><th></th>
+    </tr></thead><tbody>${rows.slice().reverse().map(r => `
       <tr>
         <td>${new Date(r.ts * 1000).toLocaleTimeString()}</td>
         <td>${escapeHtml(r.model || "—")}</td>
         <td>${fmt(r.est_tokens_before)}</td>
         <td>${fmt(r.est_tokens_after)}</td>
-        <td>${r.est_tokens_before ? pct(1 - r.est_tokens_after / r.est_tokens_before) : "—"}</td>
+        <td>${r.blocks_filtered > 0 && r.est_tokens_before ? pct(1 - r.est_tokens_after / r.est_tokens_before) : "—"}</td>
+        <td>${fmt(r.blocks_filtered || 0)}</td>
+        <td>${(() => { const t = parseToolsTrimNote(r.note); return t ? `${fmt(t.before)}->${fmt(t.after)}` : "—"; })()}</td>
         <td><button class="inspect-btn" data-request-id="${r.id}">Inspect</button></td>
       </tr>`).join("")}</tbody></table>`;
   } else {
-    c3.innerHTML += `<div class="detail-empty">No filtered requests yet.</div>`;
+    c3.innerHTML += `<div class="detail-empty">No requests recorded yet.</div>`;
   }
   main.appendChild(c3);
 
