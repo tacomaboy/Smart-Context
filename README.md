@@ -8,6 +8,9 @@ store that Claude can query back through MCP.
 Point `ANTHROPIC_BASE_URL` at it and every Claude API client routes through it —
 Claude Code, the SDKs, the `ant` CLI.
 
+In practice, this means terminal/CLI clients that let you set an Anthropic base
+URL are supported. Claude Desktop app sessions are not.
+
 ## Who this is for
 
 - People already using Anthropic API clients who want to trim tool-heavy
@@ -23,6 +26,9 @@ hook this proxy depends on.
 It also is not for Claude Desktop. Claude Desktop talks to Claude's own
 backend rather than letting you point it at a custom Anthropic base URL, so
 there is nothing for this proxy to intercept there.
+
+If you use Claude Code, run it in a terminal environment where you control
+`ANTHROPIC_BASE_URL`.
 
 ## Open source and contributions
 
@@ -90,54 +96,42 @@ Enforced by the test suite, in priority order:
 
 ## Setup
 
-### 1) Install Ollama
+### Prerequisites
+
+- Python 3.11+
+- `uv` installed: https://docs.astral.sh/uv/
+- Ollama installed and runnable
+- Disk: at least 10 GB free (the default `gemma3:12b` pull is about 8.1 GB)
+- Enough RAM/VRAM for your chosen model
+
+### 1) Install and run Ollama (headless first)
 
 You need Ollama running locally before the proxy can prune anything.
 
 Windows:
 
-1. Install Ollama with `winget`:
-
-  ```powershell
-  winget install Ollama.Ollama
-  ```
-
-2. Open Ollama once so it starts its local service.
+```powershell
+winget install Ollama.Ollama
+ollama serve
+```
 
 macOS:
 
-1. Install Ollama with Homebrew:
-
-  ```bash
-  brew install --cask ollama
-  ```
-
-  If you prefer, you can also download the app from ollama.com and drag it
-  into Applications.
-
-2. Launch Ollama once so it starts its local service.
-
-### 2) Set your Anthropic API key locally
-
-If your Anthropic client already works, you usually do not need to do anything
-here. The proxy forwards your existing auth header upstream.
-
-Set this only if your client/session does not already provide
-`ANTHROPIC_API_KEY`.
-
-PowerShell:
-
-```powershell
-$env:ANTHROPIC_API_KEY = "sk-ant-..."
+```bash
+brew install --cask ollama
+ollama serve
 ```
 
-bash/zsh:
+GUI launch also works, but `ollama serve` is the deterministic path for scripts
+and coding agents.
+
+Verification:
 
 ```bash
-export ANTHROPIC_API_KEY="sk-ant-..."
+ollama --version
 ```
 
-### 3) Pull the model
+### 2) Pull the default model
 
 The default model is `gemma3:12b`.
 
@@ -145,24 +139,52 @@ The default model is `gemma3:12b`.
 ollama pull gemma3:12b
 ```
 
-If you want to try a different local model, set `SMARTCONTEXT_LOCAL_MODEL`
-before starting the proxy.
+Verification:
 
-### 4) Set up the Python app
+```bash
+ollama list
+```
+
+Expected: `gemma3:12b` appears in the list.
+
+### 3) Set up the Python app
 
 ```bash
 uv venv
 uv pip install -e ".[dev,mcp]"
 ```
 
+Verification:
+
+```bash
+uv run smart-context doctor
+```
+
+Expected: `local LLM: reachable (gemma3:12b)`.
+
+### 4) Authentication note (important)
+
+The proxy does not require credentials of its own. It forwards whatever auth
+headers your client already sends (`x-api-key`, `authorization`, and friends).
+
+Only set `ANTHROPIC_API_KEY` if you were already using API-key auth in your
+client/session.
+
 ### 5) Start the proxy (prune mode by default)
 
-`smart-context serve` now starts in `prune` mode by default so it works out of
-the box once installed.
+`smart-context serve` starts in `prune` mode by default.
 
 ```bash
 uv run smart-context serve
 ```
+
+Verification:
+
+```bash
+curl http://127.0.0.1:4711/_smartcontext/health
+```
+
+Expected JSON includes `"ok": true` and `"mode": "prune"`.
 
 If you want measurement-only behavior, start in shadow mode explicitly:
 
@@ -170,15 +192,23 @@ If you want measurement-only behavior, start in shadow mode explicitly:
 uv run smart-context serve --mode shadow
 ```
 
+Tripwire (recommended): after a day of normal usage, run:
+
+```bash
+uv run smart-context stats
+```
+
+If pruning looks active but cache hit ratio falls materially, you can pay more,
+not less. Switch to shadow mode and investigate before continuing.
+
 ### 6) Point your Claude client at the proxy
 
 ```powershell
 $env:ANTHROPIC_BASE_URL = "http://127.0.0.1:4711"
 ```
 
-For Claude Code, prefer the `env` block in `~/.claude/settings.json` — the app
-sets `ANTHROPIC_BASE_URL` itself at launch, so a user-level Windows environment
-variable may lose the race:
+For Claude Code, prefer the `env` block in `~/.claude/settings.json` because
+the app sets `ANTHROPIC_BASE_URL` at launch:
 
 ```json
 {
@@ -187,21 +217,78 @@ variable may lose the race:
 }
 ```
 
-### 7) Check the numbers
+After changing env vars or `settings.json`, restart already-running Claude
+sessions/processes so they pick up the new values.
+
+This setup applies to terminal-based Claude Code usage. It does not make Claude
+Desktop app sessions route through the proxy.
+
+### 7) Add MCP recall
 
 ```bash
-uv run smart-context stats
+claude mcp add smart-context -- uv run --directory /path/to/Smart\ Context smart-context mcp
 ```
 
-### 8) Add MCP recall
+Use your real checkout path for `/path/to/Smart Context`.
 
-```bash
-claude mcp add smart-context -- uv run smart-context mcp
+### 8) Optional autostart recipes
+
+macOS (launchd), `~/Library/LaunchAgents/com.smartcontext.proxy.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.smartcontext.proxy</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-lc</string>
+    <string>ollama serve &amp; cd /path/to/Smart Context &amp;&amp; uv run smart-context serve</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict>
+</plist>
 ```
+
+Linux (systemd user), `~/.config/systemd/user/smart-context.service`:
+
+```ini
+[Unit]
+Description=smart-context proxy
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/path/to/Smart Context
+ExecStart=/usr/bin/env uv run smart-context serve
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+```
+
+Windows Task Scheduler (PowerShell, user context):
+
+```powershell
+schtasks /Create /TN "smart-context" /SC ONLOGON /RL LIMITED /TR "powershell -NoProfile -ExecutionPolicy Bypass -Command \"Set-Location 'C:\\path\\to\\Smart Context'; ollama serve; uv run smart-context serve\""
+```
+
+### 9) Rollback / uninstall
+
+- Stop the proxy process.
+- Remove or unset `ANTHROPIC_BASE_URL` in your shell/profile.
+- Remove the `env` override in `~/.claude/settings.json` if you added it.
+- Restart Claude sessions so they stop routing through the proxy.
+- Optional: remove local data at `SMARTCONTEXT_DATA_DIR` (default
+  `~/.smartcontext`) if you no longer need recall history.
 
 ## Use
 
-If you already have Ollama and `uv` installed, you can jump straight to step 3.
+If you already have Ollama and `uv` installed, you can jump straight to step 2.
 
 ## Hardware notes
 
@@ -319,8 +406,10 @@ What this adds over them:
 ## Privacy
 
 - The proxy relays auth headers but does not inspect or persist credentials.
-- Pruned content is stored locally in SQLite for recall. Treat the data
-  directory as sensitive if your prompts contain sensitive material.
+- Pruned content is stored locally in SQLite for recall.
+- By default this is an unencrypted at-rest file at `~/.smartcontext/context.db`.
+- Treat the data directory as sensitive if your prompts contain sensitive
+  material.
 - If you need a clean slate, use the dashboard Reset button. Shift-click reset
   to wipe stored/recallable chunks as well.
 
