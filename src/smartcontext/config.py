@@ -64,6 +64,7 @@ class Settings:
     # Off by default: trim oversized `tools` catalogs before forwarding.
     trim_tools: bool = False
     max_tools: int = 64
+    trim_tools_retry_missing: bool = True
 
     @property
     def db_path(self) -> Path:
@@ -88,6 +89,7 @@ class Settings:
             capture=_env_bool("SMARTCONTEXT_CAPTURE", False),
             trim_tools=_env_bool("SMARTCONTEXT_TRIM_TOOLS", False),
             max_tools=_env_int("SMARTCONTEXT_MAX_TOOLS", 64),
+            trim_tools_retry_missing=_env_bool("SMARTCONTEXT_TRIM_TOOLS_RETRY_MISSING", True),
         )
 
     def validate(self) -> None:

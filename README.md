@@ -210,8 +210,12 @@ SMARTCONTEXT_MAX_TOOLS=64
 ```
 
 This keeps a capped subset of tools in each request (favoring recently used and
-turn-mentioned tool names) before forwarding upstream. It reduces prompt size,
-but can hide tools that are not in the kept subset.
+turn-relevant tool names via local-model selection, with heuristic fallback)
+before forwarding upstream. It reduces prompt size, but can hide tools that are
+not in the kept subset.
+
+By default, if a trimmed request returns a missing-tool style error, the proxy
+automatically retries once with the full original tool list.
 
 ### 6) Point your Claude client at the proxy
 
@@ -387,6 +391,7 @@ uv run smart-context stats           # cache hit ratio and token totals
 | `SMARTCONTEXT_DATA_DIR` | `~/.smartcontext` | SQLite location |
 | `SMARTCONTEXT_TRIM_TOOLS` | `false` | If true, trim oversized `tools` catalogs before forwarding |
 | `SMARTCONTEXT_MAX_TOOLS` | `64` | Max tools kept when tool-catalog trimming is enabled |
+| `SMARTCONTEXT_TRIM_TOOLS_RETRY_MISSING` | `true` | Retry once with full tools if a trimmed call fails with missing-tool error |
 
 ## Endpoints
 

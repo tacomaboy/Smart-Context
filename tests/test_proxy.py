@@ -385,6 +385,101 @@ def test_tools_catalog_is_untouched_when_trimming_disabled(tmp_path):
     assert len(forwarded.get("tools", [])) == 3
 
 
+def test_tools_catalog_can_follow_local_model_selection(tmp_path):
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = request.content
+        return httpx.Response(200, json=MESSAGE_RESPONSE)
+
+    class FakeDecision:
+        keep = [2]
+
+    async def fake_select_chunks(task, chunks, keep_at_least=1):
+        return FakeDecision()
+
+    settings = Settings(mode="prune", data_dir=tmp_path, upstream="https://upstream.test")
+    settings.trim_tools = True
+    settings.max_tools = 2
+    app = create_app(settings)
+    app.state.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app.state.local.select_chunks = fake_select_chunks  # type: ignore[method-assign]
+
+    payload = {
+        "model": "claude-sonnet-5",
+        "messages": [{"role": "user", "content": "Use gamma tool"}],
+        "tools": [
+            {"name": "alpha", "description": "x", "input_schema": {"type": "object"}},
+            {"name": "beta", "description": "x", "input_schema": {"type": "object"}},
+            {"name": "gamma", "description": "x", "input_schema": {"type": "object"}},
+        ],
+    }
+
+    with TestClient(app) as client:
+        resp = client.post("/v1/messages", json=payload)
+
+    assert resp.status_code == 200
+    forwarded = json.loads(seen["body"])
+    tools = forwarded.get("tools", [])
+    assert len(tools) == 1
+    assert tools[0].get("name") == "gamma"
+
+
+def test_trimmed_tools_missing_error_auto_retries_with_full_tools(tmp_path):
+    calls: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        calls.append(payload)
+        names = {t.get("name") for t in payload.get("tools", []) if isinstance(t, dict)}
+        if "gamma" not in names:
+            return httpx.Response(
+                400,
+                json={
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "Tool gamma is not available",
+                    },
+                },
+            )
+        return httpx.Response(200, json=MESSAGE_RESPONSE)
+
+    class FakeDecision:
+        keep = [0, 1]
+
+    async def fake_select_chunks(task, chunks, keep_at_least=1):
+        return FakeDecision()
+
+    settings = Settings(mode="prune", data_dir=tmp_path, upstream="https://upstream.test")
+    settings.trim_tools = True
+    settings.max_tools = 2
+    settings.trim_tools_retry_missing = True
+    app = create_app(settings)
+    app.state.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app.state.local.select_chunks = fake_select_chunks  # type: ignore[method-assign]
+
+    payload = {
+        "model": "claude-sonnet-5",
+        "messages": [{"role": "user", "content": "Use gamma"}],
+        "tools": [
+            {"name": "alpha", "description": "x", "input_schema": {"type": "object"}},
+            {"name": "beta", "description": "x", "input_schema": {"type": "object"}},
+            {"name": "gamma", "description": "x", "input_schema": {"type": "object"}},
+        ],
+    }
+
+    with TestClient(app) as client:
+        resp = client.post("/v1/messages", json=payload)
+
+    assert resp.status_code == 200
+    assert len(calls) == 2
+    first_names = {t.get("name") for t in calls[0].get("tools", [])}
+    second_names = {t.get("name") for t in calls[1].get("tools", [])}
+    assert first_names == {"alpha", "beta"}
+    assert second_names == {"alpha", "beta", "gamma"}
+
+
 def test_upstream_pointing_at_self_is_rejected():
     settings = Settings(mode="shadow", host="127.0.0.1", port=4711,
                         upstream="http://127.0.0.1:4711")

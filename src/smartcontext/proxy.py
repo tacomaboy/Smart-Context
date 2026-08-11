@@ -183,20 +183,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
 
         body = raw
+        retry_original_body: bytes | None = None
         if settings.mode == "prune":
             try:
                 working = payload
                 tools_changed = False
                 if settings.trim_tools:
                     latest_text = latest_user_turn["text"] if latest_user_turn else ""
-                    working, before_tools, after_tools = _trim_tools_catalog(
+                    working, before_tools, after_tools, trim_method = await _trim_tools_catalog(
                         working,
+                        local=app.state.local,
                         max_tools=settings.max_tools,
                         latest_user_text=latest_text,
                     )
                     tools_changed = before_tools > after_tools
                     if tools_changed:
-                        record["note"] = f"tools trimmed {before_tools}->{after_tools}"
+                        record["note"] = f"tools trimmed {before_tools}->{after_tools} ({trim_method})"
 
                 result = await app.state.pruner.prune(working, session_key)
                 record["est_tokens_after"] = result.est_after
@@ -208,6 +210,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if result.modified or tools_changed:
                     forward_payload = result.payload if result.modified else working
                     body = json.dumps(forward_payload).encode("utf-8")
+                if tools_changed and settings.trim_tools_retry_missing:
+                    retry_payload = result.payload if result.modified else working
+                    if isinstance(payload.get("tools"), list):
+                        retry_payload = dict(retry_payload)
+                        retry_payload["tools"] = payload["tools"]
+                        retry_original_body = json.dumps(retry_payload).encode("utf-8")
             except Exception as exc:  # noqa: BLE001 - never break the request
                 log.exception("pruning failed; forwarding original request")
                 record["note"] = f"prune error, passed through: {exc}"
@@ -216,7 +224,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             record["note"] = "shadow mode: measured only"
 
         record["latency_local_ms"] = round((time.perf_counter() - started) * 1000, 1)
-        return await _forward(app, request, body, streaming=streaming, record=record)
+        return await _forward(
+            app,
+            request,
+            body,
+            streaming=streaming,
+            record=record,
+            retry_original_body=retry_original_body,
+        )
 
     @app.api_route(
         "/{path:path}",
@@ -298,19 +313,48 @@ def _recent_tool_use_names(payload: dict[str, Any], limit: int = 32) -> set[str]
     return names
 
 
-def _trim_tools_catalog(
+async def _trim_tools_catalog(
     payload: dict[str, Any],
     *,
+    local: LocalModel,
     max_tools: int,
     latest_user_text: str,
-) -> tuple[dict[str, Any], int, int]:
-    """Trim `tools` to a deterministic subset likely relevant to this turn."""
+) -> tuple[dict[str, Any], int, int, str]:
+    """Trim `tools` to a subset likely relevant to this turn.
+
+    Primary path uses the local model; fallback uses a deterministic heuristic.
+    """
     tools = payload.get("tools")
     if not isinstance(tools, list):
-        return payload, 0, 0
+        return payload, 0, 0, "none"
     if len(tools) <= max_tools:
-        return payload, len(tools), len(tools)
+        return payload, len(tools), len(tools), "none"
 
+    # Local-model ranking first: summarize each tool as one chunk and ask for
+    # the indices most likely needed for this turn.
+    chunks: list[str] = []
+    for i, tool in enumerate(tools):
+        if isinstance(tool, dict):
+            name = str(tool.get("name") or f"tool_{i}")
+            desc = str(tool.get("description") or "")[:400]
+            schema = json.dumps(tool.get("input_schema") or tool.get("parameters") or {}, ensure_ascii=False)[:1200]
+            chunks.append(f"name: {name}\ndescription: {desc}\nschema: {schema}")
+        else:
+            chunks.append(str(tool)[:1800])
+
+    decision = await local.select_chunks(
+        task=(latest_user_text or "Pick tools relevant to the current user request."),
+        chunks=chunks,
+        keep_at_least=min(max_tools, len(chunks)),
+    )
+    if decision is not None and decision.keep:
+        keep_local = sorted(idx for idx in decision.keep if 0 <= idx < len(tools))[:max_tools]
+        if keep_local:
+            trimmed = dict(payload)
+            trimmed["tools"] = [tools[i] for i in keep_local]
+            return trimmed, len(tools), len(keep_local), "local"
+
+    # Fallback: deterministic heuristic if local selection is unavailable.
     recent_used = _recent_tool_use_names(payload)
     user_text = (latest_user_text or "").lower()
 
@@ -336,7 +380,7 @@ def _trim_tools_catalog(
 
     trimmed = dict(payload)
     trimmed["tools"] = [tools[i] for i in keep_idx]
-    return trimmed, len(tools), len(keep_idx)
+    return trimmed, len(tools), len(keep_idx), "heuristic"
 
 
 def _outbound_headers(request: Request) -> dict[str, str]:
@@ -376,6 +420,7 @@ async def _forward(
     *,
     streaming: bool,
     record: dict[str, Any] | None,
+    retry_original_body: bytes | None = None,
 ) -> Response:
     settings: Settings = app.state.settings
     client: httpx.AsyncClient = app.state.client
@@ -402,6 +447,21 @@ async def _forward(
             content={"type": "error", "error": {"type": "api_error", "message": f"upstream unreachable: {exc}"}},
         )
 
+    # One-shot fallback: if tools were trimmed and upstream rejects with a
+    # missing-tool style error, retry once with the original tool catalog.
+    if retry_original_body is not None and _is_missing_tool_error(resp):
+        try:
+            retry_resp = await client.request(request.method, url, headers=headers, content=retry_original_body)
+            if record is not None:
+                record["note"] = (
+                    f"{record.get('note', '')} | auto-retried with full tools after missing-tool error"
+                ).strip(" |")
+            resp = retry_resp
+        except httpx.HTTPError as exc:
+            log.warning("retry with full tools failed: %s", exc)
+            if record is not None:
+                record["note"] = f"{record.get('note', '')} | full-tools retry failed: {exc}".strip(" |")
+
     if record is not None:
         record["status"] = resp.status_code
         _record_usage_from_json(record, resp.content)
@@ -412,6 +472,32 @@ async def _forward(
         status_code=resp.status_code,
         headers=_inbound_headers(resp),
         media_type=resp.headers.get("content-type"),
+    )
+
+
+def _is_missing_tool_error(resp: httpx.Response) -> bool:
+    if resp.status_code not in {400, 404, 409, 422}:
+        return False
+    try:
+        payload = resp.json()
+    except ValueError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+
+    message = ""
+    if isinstance(payload.get("error"), dict):
+        message = str(payload["error"].get("message") or "")
+    if not message:
+        message = str(payload.get("message") or "")
+    m = message.lower()
+    if "tool" not in m:
+        return False
+    return (
+        "not available" in m
+        or "not found" in m
+        or "unknown tool" in m
+        or "tool not" in m
     )
 
 
