@@ -1,4 +1,4 @@
-"""Full-history filtering -- the only place a request is ever modified.
+"""Request filtering -- the only place a request is ever modified.
 
 Three invariants, in priority order. Correctness beats savings every time:
 
@@ -12,12 +12,8 @@ Three invariants, in priority order. Correctness beats savings every time:
    over their exact bytes -- rewriting one is a hard 400 from the API, so
    they are excluded by construction (not in ``_FILTERABLE_TYPES``).
 
-Every message in the conversation is scanned, not just the newest turn --
-this trades the upstream prompt cache for maximum context reduction. Once any
-message is rewritten, every request from that point on re-writes the cached
-prefix (a cache **write**, billed at 1.25x) instead of reading it (0.1x).
-That is an intentional, accepted cost, not an oversight -- see ``smart-context
-stats`` / ``relative_input_cost`` to track it.
+Only the newest user turn is scanned. Earlier turns are left byte-identical so
+cacheable prefixes stay stable.
 
 Blocks carrying ``cache_control`` are still skipped outright -- those mark
 cache breakpoints the client placed, and rewriting one changes bytes the
@@ -145,17 +141,29 @@ class Pruner:
             return result
 
         # (message_index, block_index) for every oversized, filterable block
-        # in every message -- not just the newest turn.
+        # in the newest user turn only.
         targets: list[tuple[int, int]] = []
-        for m_index, message in enumerate(messages):
-            if not isinstance(message, dict):
+        latest_user_index: int | None = None
+        for m_index in range(len(messages) - 1, -1, -1):
+            message = messages[m_index]
+            if not isinstance(message, dict) or message.get("role") != "user":
                 continue
-            content = message.get("content")
-            if not isinstance(content, list):
-                continue
-            for b_index, block in enumerate(content):
-                if _is_filterable(block, self.settings.min_block_chars):
-                    targets.append((m_index, b_index))
+            if isinstance(message.get("content"), list):
+                latest_user_index = m_index
+                break
+
+        if latest_user_index is None:
+            result.note = "no user content list"
+            return result
+
+        content = messages[latest_user_index].get("content")
+        if not isinstance(content, list):
+            result.note = "no user content list"
+            return result
+
+        for b_index, block in enumerate(content):
+            if _is_filterable(block, self.settings.min_block_chars):
+                targets.append((latest_user_index, b_index))
 
         if not targets:
             result.note = "no oversized filterable blocks"
@@ -296,9 +304,9 @@ class _Replaced:
 
 # thinking/redacted_thinking are deliberately excluded: they carry a
 # cryptographic signature over their exact bytes, and rewriting one is a hard
-# 400 from the API. image/document/tool_use blocks are excluded because they
-# either aren't text or would break tool call replay if shrunk.
-_FILTERABLE_TYPES = {"tool_result", "text"}
+# 400 from the API. image/document/tool_use/text blocks are excluded because
+# either they aren't tool-result payloads or they are user-authored text.
+_FILTERABLE_TYPES = {"tool_result"}
 
 
 def _is_filterable(block: Any, min_chars: int) -> bool:

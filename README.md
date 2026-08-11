@@ -201,6 +201,18 @@ uv run smart-context stats
 If pruning looks active but cache hit ratio falls materially, you can pay more,
 not less. Switch to shadow mode and investigate before continuing.
 
+If your client loads a very large MCP/tools catalog each turn, you can opt in
+to tools-catalog trimming as well:
+
+```bash
+SMARTCONTEXT_TRIM_TOOLS=true
+SMARTCONTEXT_MAX_TOOLS=64
+```
+
+This keeps a capped subset of tools in each request (favoring recently used and
+turn-mentioned tool names) before forwarding upstream. It reduces prompt size,
+but can hide tools that are not in the kept subset.
+
 ### 6) Point your Claude client at the proxy
 
 ```powershell
@@ -373,6 +385,8 @@ uv run smart-context stats           # cache hit ratio and token totals
 | `SMARTCONTEXT_LOCAL_MODEL` | `gemma3:12b` | Ollama model |
 | `SMARTCONTEXT_OLLAMA_BASE` | auto | Tries `:4700` (dashboard) then `:11434` |
 | `SMARTCONTEXT_DATA_DIR` | `~/.smartcontext` | SQLite location |
+| `SMARTCONTEXT_TRIM_TOOLS` | `false` | If true, trim oversized `tools` catalogs before forwarding |
+| `SMARTCONTEXT_MAX_TOOLS` | `64` | Max tools kept when tool-catalog trimming is enabled |
 
 ## Endpoints
 

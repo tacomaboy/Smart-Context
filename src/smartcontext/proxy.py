@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -184,14 +185,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         body = raw
         if settings.mode == "prune":
             try:
-                result = await app.state.pruner.prune(payload, session_key)
+                working = payload
+                tools_changed = False
+                if settings.trim_tools:
+                    latest_text = latest_user_turn["text"] if latest_user_turn else ""
+                    working, before_tools, after_tools = _trim_tools_catalog(
+                        working,
+                        max_tools=settings.max_tools,
+                        latest_user_text=latest_text,
+                    )
+                    tools_changed = before_tools > after_tools
+                    if tools_changed:
+                        record["note"] = f"tools trimmed {before_tools}->{after_tools}"
+
+                result = await app.state.pruner.prune(working, session_key)
                 record["est_tokens_after"] = result.est_after
                 record["blocks_filtered"] = result.blocks_filtered
                 record["local_model_used"] = int(result.local_model_used)
                 record["prune_details"] = result.details
-                record["note"] = result.note
-                if result.modified:
-                    body = json.dumps(result.payload).encode("utf-8")
+                if result.note:
+                    record["note"] = f"{record.get('note', '')} | {result.note}".strip(" |")
+                if result.modified or tools_changed:
+                    forward_payload = result.payload if result.modified else working
+                    body = json.dumps(forward_payload).encode("utf-8")
             except Exception as exc:  # noqa: BLE001 - never break the request
                 log.exception("pruning failed; forwarding original request")
                 record["note"] = f"prune error, passed through: {exc}"
@@ -257,6 +273,70 @@ def _content_to_text(content: Any) -> tuple[str, int | None]:
         return json.dumps(content, ensure_ascii=False), None
     except Exception:
         return "", None
+
+
+def _recent_tool_use_names(payload: dict[str, Any], limit: int = 32) -> set[str]:
+    names: set[str] = set()
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return names
+
+    for msg in reversed(messages):
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            name = block.get("name")
+            if isinstance(name, str) and name.strip():
+                names.add(name.strip().lower())
+                if len(names) >= limit:
+                    return names
+    return names
+
+
+def _trim_tools_catalog(
+    payload: dict[str, Any],
+    *,
+    max_tools: int,
+    latest_user_text: str,
+) -> tuple[dict[str, Any], int, int]:
+    """Trim `tools` to a deterministic subset likely relevant to this turn."""
+    tools = payload.get("tools")
+    if not isinstance(tools, list):
+        return payload, 0, 0
+    if len(tools) <= max_tools:
+        return payload, len(tools), len(tools)
+
+    recent_used = _recent_tool_use_names(payload)
+    user_text = (latest_user_text or "").lower()
+
+    ranked: list[tuple[int, int]] = []
+    for idx, tool in enumerate(tools):
+        score = 0
+        name = ""
+        if isinstance(tool, dict) and isinstance(tool.get("name"), str):
+            name = tool["name"].strip()
+        low = name.lower()
+
+        if low and low in recent_used:
+            score += 100
+        if low and user_text:
+            relaxed = re.sub(r"[^a-z0-9]+", " ", low).strip()
+            if low in user_text or (relaxed and relaxed in user_text):
+                score += 10
+
+        ranked.append((score, idx))
+
+    ranked.sort(key=lambda pair: (-pair[0], pair[1]))
+    keep_idx = sorted(idx for _, idx in ranked[:max_tools])
+
+    trimmed = dict(payload)
+    trimmed["tools"] = [tools[i] for i in keep_idx]
+    return trimmed, len(tools), len(keep_idx)
 
 
 def _outbound_headers(request: Request) -> dict[str, str]:

@@ -107,10 +107,9 @@ async def test_earlier_non_filterable_content_is_untouched(settings, store):
     assert result.payload["system"] == original["system"]
 
 
-async def test_earlier_oversized_tool_result_is_also_filtered(settings, store):
-    """Full-history scanning: an oversized block buried in earlier turns is
-    eligible too, not just the newest one -- the cache-cost tradeoff is
-    accepted deliberately, see the pruner module docstring."""
+async def test_earlier_oversized_tool_result_is_not_filtered(settings, store):
+    """Only the newest user turn is eligible; historical turns stay untouched
+    to preserve cacheable prefixes."""
     payload = payload_with_tool_result()
     # Push the big block into history and end on a plain user question.
     payload["messages"].append({"role": "assistant", "content": [{"type": "text", "text": "ok"}]})
@@ -119,10 +118,8 @@ async def test_earlier_oversized_tool_result_is_also_filtered(settings, store):
     pruner = Pruner(settings, store, FakeLocal())
     result = await pruner.prune(payload, "sess1")
 
-    assert result.modified
-    filtered_block = result.payload["messages"][2]["content"][0]
-    assert filtered_block["type"] == "tool_result"
-    assert len(filtered_block["content"][0]["text"]) < len(BIG)
+    assert not result.modified
+    assert result.payload == payload
 
 
 async def test_fails_open_when_local_model_is_down(settings, store):
@@ -196,7 +193,8 @@ async def test_kept_text_is_verbatim_not_regenerated(settings, store):
 
 
 async def test_assistant_tail_does_not_block_filtering_elsewhere(settings, store):
-    """Message role no longer gates filtering -- only block type and size do."""
+    """If the latest message is assistant-only, we still scan backward to the
+    newest user turn and filter there when needed."""
     payload = payload_with_tool_result()
     payload["messages"].append({"role": "assistant", "content": [{"type": "text", "text": "hi"}]})
 
@@ -205,7 +203,7 @@ async def test_assistant_tail_does_not_block_filtering_elsewhere(settings, store
     assert result.modified
 
 
-async def test_oversized_text_block_is_shrunk(settings, store):
+async def test_oversized_text_block_is_not_shrunk(settings, store):
     payload = {
         "model": "claude-opus-5",
         "system": "You are a helpful assistant.",
@@ -216,11 +214,8 @@ async def test_oversized_text_block_is_shrunk(settings, store):
     pruner = Pruner(settings, store, FakeLocal())
     result = await pruner.prune(payload, "sess1")
 
-    assert result.modified
-    block = result.payload["messages"][0]["content"][0]
-    assert block["type"] == "text"
-    assert "smart-context" in block["text"]
-    assert len(block["text"]) < len(BIG)
+    assert not result.modified
+    assert result.payload == payload
 
 
 async def test_thinking_blocks_are_never_touched(settings, store):

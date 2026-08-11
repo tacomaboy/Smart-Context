@@ -61,6 +61,10 @@ class Settings:
     # Only for building fixtures to feed `smart-context sweep` offline.
     capture: bool = False
 
+    # Off by default: trim oversized `tools` catalogs before forwarding.
+    trim_tools: bool = False
+    max_tools: int = 64
+
     @property
     def db_path(self) -> Path:
         return self.data_dir / "context.db"
@@ -82,6 +86,8 @@ class Settings:
             local_model=os.environ.get("SMARTCONTEXT_LOCAL_MODEL", "gemma3:12b"),
             ollama_base=os.environ.get("SMARTCONTEXT_OLLAMA_BASE") or None,
             capture=_env_bool("SMARTCONTEXT_CAPTURE", False),
+            trim_tools=_env_bool("SMARTCONTEXT_TRIM_TOOLS", False),
+            max_tools=_env_int("SMARTCONTEXT_MAX_TOOLS", 64),
         )
 
     def validate(self) -> None:
@@ -89,3 +95,5 @@ class Settings:
             raise ValueError(f"SMARTCONTEXT_MODE must be 'shadow' or 'prune', got {self.mode!r}")
         if self.upstream.rstrip("/").startswith(f"http://{self.host}:{self.port}"):
             raise ValueError("upstream points back at this proxy -- that would loop forever")
+        if self.max_tools < 1:
+            raise ValueError("SMARTCONTEXT_MAX_TOOLS must be >= 1")

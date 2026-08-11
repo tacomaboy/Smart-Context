@@ -156,9 +156,8 @@
     color: var(--text-secondary); font-size: 12px;
   }
   .diff-pre {
-    margin: 0; padding: 12px; overflow: auto; max-height: 420px;
+    margin: 0; padding: 12px; overflow: visible; max-height: none;
     font: 12px/1.5 Consolas, "SFMono-Regular", Menlo, monospace;
-    overscroll-behavior: contain;
   }
   .diff-line { display: block; white-space: pre-wrap; word-break: break-word; }
   .diff-line.same { color: var(--text-secondary); }
@@ -190,7 +189,12 @@
     display: flex; align-items: center; justify-content: center; flex: none;
   }
   .modal-close:hover { color: var(--text-primary); border-color: var(--text-secondary); }
-  .modal-body { padding: 18px; overflow: auto; overscroll-behavior: contain; }
+  .modal-body {
+    padding: 18px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    overscroll-behavior: contain;
+  }
 
   /* tooltip ------------------------------------------------------------- */
   #tip {

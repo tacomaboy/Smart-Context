@@ -310,6 +310,81 @@ def test_prune_mode_falls_back_when_local_model_is_down(tmp_path):
     assert json.loads(seen["body"]) == payload, "must forward the original request untouched"
 
 
+def test_prune_mode_can_trim_tools_catalog(tmp_path):
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = request.content
+        return httpx.Response(200, json=MESSAGE_RESPONSE)
+
+    settings = Settings(mode="prune", data_dir=tmp_path, upstream="https://upstream.test")
+    settings.trim_tools = True
+    settings.max_tools = 2
+    settings.ollama_base = "http://127.0.0.1:9"  # keep tool-result pruning fail-open
+    app = create_app(settings)
+    app.state.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    payload = {
+        "model": "claude-sonnet-5",
+        "messages": [
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "tu1", "name": "search_docs", "input": {}}],
+            },
+            {"role": "user", "content": "Please run search_docs and list files"},
+        ],
+        "tools": [
+            {"name": "unrelated_one", "description": "x", "input_schema": {"type": "object"}},
+            {"name": "search_docs", "description": "x", "input_schema": {"type": "object"}},
+            {"name": "list_files", "description": "x", "input_schema": {"type": "object"}},
+            {"name": "unrelated_two", "description": "x", "input_schema": {"type": "object"}},
+        ],
+    }
+
+    with TestClient(app) as client:
+        resp = client.post("/v1/messages", json=payload)
+
+    assert resp.status_code == 200
+    forwarded = json.loads(seen["body"])
+    assert isinstance(forwarded.get("tools"), list)
+    assert len(forwarded["tools"]) == 2
+    names = {tool.get("name") for tool in forwarded["tools"]}
+    assert "search_docs" in names
+    assert "list_files" in names
+
+
+def test_tools_catalog_is_untouched_when_trimming_disabled(tmp_path):
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = request.content
+        return httpx.Response(200, json=MESSAGE_RESPONSE)
+
+    settings = Settings(mode="prune", data_dir=tmp_path, upstream="https://upstream.test")
+    settings.trim_tools = False
+    settings.max_tools = 2
+    settings.ollama_base = "http://127.0.0.1:9"
+    app = create_app(settings)
+    app.state.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    payload = {
+        "model": "claude-sonnet-5",
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [
+            {"name": "a", "description": "x", "input_schema": {"type": "object"}},
+            {"name": "b", "description": "x", "input_schema": {"type": "object"}},
+            {"name": "c", "description": "x", "input_schema": {"type": "object"}},
+        ],
+    }
+
+    with TestClient(app) as client:
+        resp = client.post("/v1/messages", json=payload)
+
+    assert resp.status_code == 200
+    forwarded = json.loads(seen["body"])
+    assert len(forwarded.get("tools", [])) == 3
+
+
 def test_upstream_pointing_at_self_is_rejected():
     settings = Settings(mode="shadow", host="127.0.0.1", port=4711,
                         upstream="http://127.0.0.1:4711")
