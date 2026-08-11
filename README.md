@@ -201,8 +201,7 @@ uv run smart-context stats
 If pruning looks active but cache hit ratio falls materially, you can pay more,
 not less. Switch to shadow mode and investigate before continuing.
 
-If your client loads a very large MCP/tools catalog each turn, you can opt in
-to tools-catalog trimming as well:
+Tools-catalog trimming is enabled by default to reduce large MCP/tools payloads:
 
 ```bash
 SMARTCONTEXT_TRIM_TOOLS=true
@@ -216,6 +215,12 @@ not in the kept subset.
 
 By default, if a trimmed request returns a missing-tool style error, the proxy
 automatically retries once with the full original tool list.
+
+If needed, you can disable tools-catalog trimming explicitly:
+
+```bash
+SMARTCONTEXT_TRIM_TOOLS=false
+```
 
 ### 6) Point your Claude client at the proxy
 
@@ -389,7 +394,7 @@ uv run smart-context stats           # cache hit ratio and token totals
 | `SMARTCONTEXT_LOCAL_MODEL` | `gemma3:12b` | Ollama model |
 | `SMARTCONTEXT_OLLAMA_BASE` | auto | Tries `:4700` (dashboard) then `:11434` |
 | `SMARTCONTEXT_DATA_DIR` | `~/.smartcontext` | SQLite location |
-| `SMARTCONTEXT_TRIM_TOOLS` | `false` | If true, trim oversized `tools` catalogs before forwarding |
+| `SMARTCONTEXT_TRIM_TOOLS` | `true` | If true, trim oversized `tools` catalogs before forwarding |
 | `SMARTCONTEXT_MAX_TOOLS` | `64` | Max tools kept when tool-catalog trimming is enabled |
 | `SMARTCONTEXT_TRIM_TOOLS_RETRY_MISSING` | `true` | Retry once with full tools if a trimmed call fails with missing-tool error |
 

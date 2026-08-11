@@ -61,8 +61,8 @@ class Settings:
     # Only for building fixtures to feed `smart-context sweep` offline.
     capture: bool = False
 
-    # Off by default: trim oversized `tools` catalogs before forwarding.
-    trim_tools: bool = False
+    # On by default: trim oversized `tools` catalogs before forwarding.
+    trim_tools: bool = True
     max_tools: int = 64
     trim_tools_retry_missing: bool = True
 
@@ -87,7 +87,7 @@ class Settings:
             local_model=os.environ.get("SMARTCONTEXT_LOCAL_MODEL", "gemma3:12b"),
             ollama_base=os.environ.get("SMARTCONTEXT_OLLAMA_BASE") or None,
             capture=_env_bool("SMARTCONTEXT_CAPTURE", False),
-            trim_tools=_env_bool("SMARTCONTEXT_TRIM_TOOLS", False),
+            trim_tools=_env_bool("SMARTCONTEXT_TRIM_TOOLS", True),
             max_tools=_env_int("SMARTCONTEXT_MAX_TOOLS", 64),
             trim_tools_retry_missing=_env_bool("SMARTCONTEXT_TRIM_TOOLS_RETRY_MISSING", True),
         )
