@@ -132,10 +132,34 @@ async def test_fails_open_when_local_model_is_down(settings, store):
     assert result.payload == payload
 
 
-async def test_cache_control_blocks_are_skipped(settings, store):
-    """That marker is the client's cache breakpoint; moving it is not ours to do."""
+async def test_cache_control_blocks_in_newest_turn_can_still_be_filtered(settings, store):
+    """Newest-turn cache_control blocks can be trimmed and should keep the marker."""
     pruner = Pruner(settings, store, FakeLocal())
     payload = payload_with_tool_result(cache_control={"type": "ephemeral"})
+    result = await pruner.prune(payload, "sess1")
+
+    assert result.modified
+    block = result.payload["messages"][-1]["content"][0]
+    assert block["cache_control"] == {"type": "ephemeral"}
+
+
+async def test_cache_control_blocks_in_earlier_turns_are_still_skipped(settings, store):
+    """Older cache breakpoints remain off-limits."""
+    payload = {
+        "model": "claude-opus-5",
+        "system": "You are a helpful assistant.",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_old", "content": BIG, "cache_control": {"type": "ephemeral"}},
+                ],
+            },
+            {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+            {"role": "user", "content": [{"type": "text", "text": "and now?"}]},
+        ],
+    }
+    pruner = Pruner(settings, store, FakeLocal())
     result = await pruner.prune(payload, "sess1")
 
     assert not result.modified

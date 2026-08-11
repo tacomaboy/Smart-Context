@@ -349,7 +349,7 @@ async def _trim_tools_catalog(
     decision = await local.select_chunks(
         task=(latest_user_text or "Pick tools relevant to the current user request."),
         chunks=chunks,
-        keep_at_least=min(max_tools, len(chunks)),
+        keep_at_least=0,
     )
     if decision is not None and decision.keep:
         keep_local = sorted(idx for idx in decision.keep if 0 <= idx < len(tools))[:max_tools]
@@ -380,7 +380,7 @@ async def _trim_tools_catalog(
         ranked.append((score, idx))
 
     ranked.sort(key=lambda pair: (-pair[0], pair[1]))
-    keep_idx = sorted(idx for _, idx in ranked[:max_tools])
+    keep_idx = sorted(idx for score, idx in ranked[:max_tools] if score > 0)
 
     trimmed = dict(payload)
     trimmed["tools"] = [tools[i] for i in keep_idx]

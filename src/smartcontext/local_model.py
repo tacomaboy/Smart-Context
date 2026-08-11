@@ -33,7 +33,9 @@ EXCERPTS:
 {chunks}
 
 Reply with ONLY a JSON array of the integer indices to keep, most relevant first. \
-Example: [0, 3, 4]. If unsure, keep the excerpt. No prose."""
+Example: [0, 3, 4]. If unsure, keep the excerpt. No prose.
+
+For tool catalogs, return [] if no tools are needed. No prose."""
 
 
 @dataclass

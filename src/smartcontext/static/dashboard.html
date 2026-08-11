@@ -143,12 +143,12 @@
     background: var(--plane); color: var(--text-primary); cursor: pointer;
   }
   .inspect-btn:hover { border-color: var(--text-secondary); }
-  .detail-shell { display: grid; gap: 14px; margin-top: 16px; }
+  .detail-shell { display: grid; gap: 14px; margin-top: 16px; min-height: 0; }
   .detail-meta { display: flex; gap: 10px; flex-wrap: wrap; color: var(--text-secondary); font-size: 12px; }
   .detail-meta span { padding: 3px 8px; border: 1px solid var(--border); border-radius: 999px; }
   .diff-block {
     border: 1px solid var(--border); border-radius: 10px; overflow: hidden;
-    background: var(--plane);
+    background: var(--plane); min-height: 0;
   }
   .diff-head {
     display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap;
@@ -156,8 +156,11 @@
     color: var(--text-secondary); font-size: 12px;
   }
   .diff-pre {
-    margin: 0; padding: 12px; overflow: visible; max-height: none;
+    margin: 0; padding: 12px; overflow: auto; max-height: 42vh;
     font: 12px/1.5 Consolas, "SFMono-Regular", Menlo, monospace;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable both-edges;
+    -webkit-overflow-scrolling: touch;
   }
   .diff-line { display: block; white-space: pre-wrap; word-break: break-word; }
   .diff-line.same { color: var(--text-secondary); }

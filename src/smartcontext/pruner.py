@@ -15,9 +15,11 @@ Three invariants, in priority order. Correctness beats savings every time:
 Only the newest user turn is scanned. Earlier turns are left byte-identical so
 cacheable prefixes stay stable.
 
-Blocks carrying ``cache_control`` are still skipped outright -- those mark
-cache breakpoints the client placed, and rewriting one changes bytes the
-client is relying on to stay put.
+Blocks carrying ``cache_control`` in older turns are still skipped outright --
+those mark cache breakpoints the client placed, and rewriting one changes
+bytes the client is relying on to stay put. The newest user turn is the only
+turn this pruner ever rewrites, so cache_control-bearing blocks there can be
+filtered safely and keep the marker intact.
 """
 
 from __future__ import annotations
@@ -162,7 +164,7 @@ class Pruner:
             return result
 
         for b_index, block in enumerate(content):
-            if _is_filterable(block, self.settings.min_block_chars):
+            if _is_filterable(block, self.settings.min_block_chars, allow_cache_control=True):
                 targets.append((latest_user_index, b_index))
 
         if not targets:
@@ -278,6 +280,8 @@ class Pruner:
             new_block["text"] = after_text
         else:
             new_block["content"] = [{"type": "text", "text": after_text}]
+        if block.get("cache_control"):
+            new_block["cache_control"] = block["cache_control"]
         return _Replaced(
             block=new_block,
             handles=handles,
@@ -309,7 +313,7 @@ class _Replaced:
 _FILTERABLE_TYPES = {"tool_result"}
 
 
-def _is_filterable(block: Any, min_chars: int) -> bool:
+def _is_filterable(block: Any, min_chars: int, allow_cache_control: bool = False) -> bool:
     from .tokens import block_text
 
     if not isinstance(block, dict):
@@ -317,7 +321,7 @@ def _is_filterable(block: Any, min_chars: int) -> bool:
     if block.get("type") not in _FILTERABLE_TYPES:
         return False
     # Never disturb a cache breakpoint the client placed.
-    if block.get("cache_control"):
+    if block.get("cache_control") and not allow_cache_control:
         return False
     return len(block_text(block)) >= min_chars
 
