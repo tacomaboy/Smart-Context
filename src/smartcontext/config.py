@@ -33,12 +33,12 @@ def _env_int(name: str, default: int) -> int:
 class Settings:
     """Runtime settings.
 
-    ``mode`` is the safety dial:
-      shadow  - never modify a request; only measure. The honest starting point.
+    ``mode`` controls runtime behavior:
       prune   - filter oversized tool results in the final user turn.
+      shadow  - never modify a request; only measure.
     """
 
-    mode: str = "shadow"
+    mode: str = "prune"
     upstream: str = DEFAULT_UPSTREAM
     host: str = "127.0.0.1"
     port: int = 4711
@@ -72,7 +72,7 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         return cls(
-            mode=os.environ.get("SMARTCONTEXT_MODE", "shadow").strip().lower(),
+            mode=os.environ.get("SMARTCONTEXT_MODE", "prune").strip().lower(),
             upstream=os.environ.get("SMARTCONTEXT_UPSTREAM", DEFAULT_UPSTREAM).rstrip("/"),
             host=os.environ.get("SMARTCONTEXT_HOST", "127.0.0.1"),
             port=_env_int("SMARTCONTEXT_PORT", 4711),

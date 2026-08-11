@@ -117,7 +117,24 @@ macOS:
 
 2. Launch Ollama once so it starts its local service.
 
-### 2) Pull the model
+### 2) Set your Anthropic API key locally
+
+Set this before you start the proxy so API clients do not fail once traffic is
+routed through it.
+
+PowerShell:
+
+```powershell
+$env:ANTHROPIC_API_KEY = "sk-ant-..."
+```
+
+bash/zsh:
+
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+### 3) Pull the model
 
 The default model is `gemma3:12b`.
 
@@ -128,23 +145,29 @@ ollama pull gemma3:12b
 If you want to try a different local model, set `SMARTCONTEXT_LOCAL_MODEL`
 before starting the proxy.
 
-### 3) Set up the Python app
+### 4) Set up the Python app
 
 ```bash
 uv venv
 uv pip install -e ".[dev,mcp]"
 ```
 
-### 4) Start in shadow mode first
+### 5) Start the proxy (prune mode by default)
 
-Shadow mode measures requests without changing them. That lets you see how much
-context is being filtered before you turn pruning on.
+`smart-context serve` now starts in `prune` mode by default so it works out of
+the box once installed.
 
 ```bash
 uv run smart-context serve
 ```
 
-### 5) Point your Claude client at the proxy
+If you want measurement-only behavior, start in shadow mode explicitly:
+
+```bash
+uv run smart-context serve --mode shadow
+```
+
+### 6) Point your Claude client at the proxy
 
 ```powershell
 $env:ANTHROPIC_BASE_URL = "http://127.0.0.1:4711"
@@ -161,16 +184,10 @@ variable may lose the race:
 }
 ```
 
-### 6) Check the numbers
+### 7) Check the numbers
 
 ```bash
 uv run smart-context stats
-```
-
-### 7) Turn pruning on when you're ready
-
-```bash
-uv run smart-context serve --mode prune
 ```
 
 ### 8) Add MCP recall
@@ -258,7 +275,7 @@ uv run smart-context stats           # cache hit ratio and token totals
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `SMARTCONTEXT_MODE` | `shadow` | `shadow` (measure only) or `prune` |
+| `SMARTCONTEXT_MODE` | `prune` | `prune` (default) or `shadow` (measure only) |
 | `SMARTCONTEXT_PORT` | `4711` | Listen port |
 | `SMARTCONTEXT_UPSTREAM` | `https://api.anthropic.com` | Real API endpoint |
 | `SMARTCONTEXT_MIN_BLOCK_CHARS` | `4000` | Below this, blocks are never touched |
