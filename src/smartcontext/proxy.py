@@ -48,6 +48,42 @@ _SKIP_RESPONSE_HEADERS = {
 }
 
 
+def _runtime_config_snapshot(settings: Settings) -> dict[str, Any]:
+    return {
+        "mode": settings.mode,
+        "min_block_chars": settings.min_block_chars,
+        "keep_budget_chars": settings.keep_budget_chars,
+        "chunk_chars": settings.chunk_chars,
+        "trim_tools": settings.trim_tools,
+        "max_tools": settings.max_tools,
+        "trim_tools_retry_missing": settings.trim_tools_retry_missing,
+    }
+
+
+def _coerce_int(name: str, value: Any, *, minimum: int) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer")
+    try:
+        out = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if out < minimum:
+        raise ValueError(f"{name} must be >= {minimum}")
+    return out
+
+
+def _coerce_bool(name: str, value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        raw = value.strip().lower()
+        if raw in {"1", "true", "yes", "on"}:
+            return True
+        if raw in {"0", "false", "no", "off"}:
+            return False
+    raise ValueError(f"{name} must be a boolean")
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     settings.validate()
@@ -89,6 +125,55 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def stats() -> dict[str, Any]:
         return app.state.store.stats()
 
+    @app.get("/_smartcontext/config")
+    async def config() -> dict[str, Any]:
+        return {"ok": True, "config": _runtime_config_snapshot(settings)}
+
+    @app.post("/_smartcontext/config")
+    async def config_update(request: Request) -> Response:
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+            return JSONResponse(status_code=400, content={"ok": False, "error": "invalid JSON body"})
+        if not isinstance(body, dict):
+            return JSONResponse(status_code=400, content={"ok": False, "error": "JSON body must be an object"})
+
+        updates: dict[str, Any] = {}
+        try:
+            if "mode" in body:
+                mode = str(body["mode"]).strip().lower()
+                if mode not in {"shadow", "prune"}:
+                    raise ValueError("mode must be 'shadow' or 'prune'")
+                updates["mode"] = mode
+            if "min_block_chars" in body:
+                updates["min_block_chars"] = _coerce_int("min_block_chars", body["min_block_chars"], minimum=0)
+            if "keep_budget_chars" in body:
+                updates["keep_budget_chars"] = _coerce_int("keep_budget_chars", body["keep_budget_chars"], minimum=1)
+            if "chunk_chars" in body:
+                updates["chunk_chars"] = _coerce_int("chunk_chars", body["chunk_chars"], minimum=1)
+            if "trim_tools" in body:
+                updates["trim_tools"] = _coerce_bool("trim_tools", body["trim_tools"])
+            if "max_tools" in body:
+                updates["max_tools"] = _coerce_int("max_tools", body["max_tools"], minimum=1)
+            if "trim_tools_retry_missing" in body:
+                updates["trim_tools_retry_missing"] = _coerce_bool(
+                    "trim_tools_retry_missing", body["trim_tools_retry_missing"]
+                )
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+
+        before = _runtime_config_snapshot(settings)
+        try:
+            for key, value in updates.items():
+                setattr(settings, key, value)
+            settings.validate()
+        except Exception as exc:  # noqa: BLE001 - restore prior values on any validation failure
+            for key, value in before.items():
+                setattr(settings, key, value)
+            return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+
+        return {"ok": True, "updated": updates, "config": _runtime_config_snapshot(settings)}
+
     @app.get("/_smartcontext/requests")
     async def requests_log(limit: int = 25) -> dict[str, Any]:
         return {"requests": list(app.state.store.iter_requests(limit))}
@@ -115,6 +200,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "mode": settings.mode,
             "local_model": settings.local_model,
             "local_model_available": await app.state.local.available(),
+            "config": _runtime_config_snapshot(settings),
             "stats": stats,
             # Exact, from response usage objects.
             "sent_tokens": sent,

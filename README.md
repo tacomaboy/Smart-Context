@@ -366,8 +366,8 @@ Local context held versus context actually sent, refreshing every 5s:
   request count.
 - **Prompt token composition** — stacked columns per request of cache read /
   cache write / fresh input. Cache read dominating is the healthy shape.
-- **Held locally → sent upstream** — a dumbbell per filtered request showing
-  what was trimmed.
+- **Held locally → sent upstream** — a dumbbell per comparable request showing
+  estimated before vs sent upstream (including zero-savings rows).
 
 Watch the **cache hit ratio** as closely as the savings. If pruning is working
 but that number falls, you are paying more, not less — that is the failure mode
@@ -389,7 +389,7 @@ uv run smart-context stats           # cache hit ratio and token totals
 | `SMARTCONTEXT_MODE` | `prune` | `prune` (default) or `shadow` (measure only) |
 | `SMARTCONTEXT_PORT` | `4711` | Listen port |
 | `SMARTCONTEXT_UPSTREAM` | `https://api.anthropic.com` | Real API endpoint |
-| `SMARTCONTEXT_MIN_BLOCK_CHARS` | `4000` | Below this, blocks are never touched |
+| `SMARTCONTEXT_MIN_BLOCK_CHARS` | `0` | Minimum block size to consider; `0` means no floor |
 | `SMARTCONTEXT_KEEP_BUDGET_CHARS` | `1500` | Target size of the kept portion |
 | `SMARTCONTEXT_LOCAL_MODEL` | `gemma3:12b` | Ollama model |
 | `SMARTCONTEXT_OLLAMA_BASE` | auto | Tries `:4700` (dashboard) then `:11434` |

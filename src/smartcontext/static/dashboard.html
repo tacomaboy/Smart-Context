@@ -115,6 +115,39 @@
   .kpi-value { font-size: 26px; font-weight: 600; letter-spacing: -0.01em; }
   .kpi-note { color: var(--text-muted); font-size: 11px; margin-top: 6px; }
 
+  .config-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    margin-top: 10px;
+  }
+  .config-field label {
+    display: block;
+    color: var(--text-secondary);
+    font-size: 12px;
+    margin-bottom: 6px;
+  }
+  .config-field input,
+  .config-field select {
+    width: 100%;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 9px;
+    background: var(--plane);
+    color: var(--text-primary);
+    font: inherit;
+  }
+  .config-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 12px;
+  }
+  .config-status {
+    color: var(--text-secondary);
+    font-size: 12px;
+  }
+
   /* charts -------------------------------------------------------------- */
   .chart-card { margin-bottom: 22px; }
   .chart-head { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; flex-wrap: wrap; margin-bottom: 4px; }
@@ -540,6 +573,104 @@ function openCostHelpModal() {
   openModal("How cache billing and cost calculations work");
 }
 
+function configCard(config) {
+  const mode = String(config?.mode || "prune");
+  const trimTools = !!config?.trim_tools;
+  const retryMissing = !!config?.trim_tools_retry_missing;
+  const minChars = Number(config?.min_block_chars ?? 0);
+  const keepBudget = Number(config?.keep_budget_chars ?? 1500);
+  const chunkChars = Number(config?.chunk_chars ?? 900);
+  const maxTools = Number(config?.max_tools ?? 64);
+
+  const card = document.createElement("div");
+  card.className = "card chart-card";
+  card.innerHTML = `
+    <div class="chart-head"><h2>Dashboard settings</h2></div>
+    <p class="chart-sub">Tune pruning and tool-catalog limits live (no restart). Lower text floors can increase savings, but may add more local-model work.</p>
+    <div class="config-grid">
+      <div class="config-field">
+        <label for="cfg-mode">Mode</label>
+        <select id="cfg-mode">
+          <option value="prune" ${mode === "prune" ? "selected" : ""}>prune</option>
+          <option value="shadow" ${mode === "shadow" ? "selected" : ""}>shadow</option>
+        </select>
+      </div>
+      <div class="config-field">
+        <label for="cfg-min-block">Min text chars (0 = no floor)</label>
+        <input id="cfg-min-block" type="number" min="0" step="1" value="${Number.isFinite(minChars) ? minChars : 0}">
+      </div>
+      <div class="config-field">
+        <label for="cfg-keep-budget">Keep budget chars</label>
+        <input id="cfg-keep-budget" type="number" min="1" step="1" value="${Number.isFinite(keepBudget) ? keepBudget : 1500}">
+      </div>
+      <div class="config-field">
+        <label for="cfg-chunk">Chunk chars</label>
+        <input id="cfg-chunk" type="number" min="1" step="1" value="${Number.isFinite(chunkChars) ? chunkChars : 900}">
+      </div>
+      <div class="config-field">
+        <label for="cfg-trim-tools">Trim tools catalog</label>
+        <select id="cfg-trim-tools">
+          <option value="true" ${trimTools ? "selected" : ""}>true</option>
+          <option value="false" ${!trimTools ? "selected" : ""}>false</option>
+        </select>
+      </div>
+      <div class="config-field">
+        <label for="cfg-max-tools">Max tools kept</label>
+        <input id="cfg-max-tools" type="number" min="1" step="1" value="${Number.isFinite(maxTools) ? maxTools : 64}">
+      </div>
+      <div class="config-field">
+        <label for="cfg-retry-missing">Retry missing-tool with full tools</label>
+        <select id="cfg-retry-missing">
+          <option value="true" ${retryMissing ? "selected" : ""}>true</option>
+          <option value="false" ${!retryMissing ? "selected" : ""}>false</option>
+        </select>
+      </div>
+    </div>
+    <div class="config-actions">
+      <button class="btn" id="cfg-save">Save settings</button>
+      <span class="config-status" id="cfg-status">Current values shown from runtime config.</span>
+    </div>`;
+
+  const saveBtn = card.querySelector("#cfg-save");
+  const status = card.querySelector("#cfg-status");
+  saveBtn?.addEventListener("click", async () => {
+    if (!saveBtn || !status) return;
+    const payload = {
+      mode: card.querySelector("#cfg-mode")?.value || "prune",
+      min_block_chars: Number(card.querySelector("#cfg-min-block")?.value || 0),
+      keep_budget_chars: Number(card.querySelector("#cfg-keep-budget")?.value || 1500),
+      chunk_chars: Number(card.querySelector("#cfg-chunk")?.value || 900),
+      trim_tools: (card.querySelector("#cfg-trim-tools")?.value || "true") === "true",
+      max_tools: Number(card.querySelector("#cfg-max-tools")?.value || 64),
+      trim_tools_retry_missing: (card.querySelector("#cfg-retry-missing")?.value || "true") === "true",
+    };
+
+    saveBtn.disabled = true;
+    status.textContent = "Saving…";
+    try {
+      const resp = await fetch("/_smartcontext/config", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const body = await resp.json().catch(() => ({}));
+      if (!resp.ok || !body.ok) {
+        const msg = body && body.error ? String(body.error) : `HTTP ${resp.status}`;
+        status.textContent = `Save failed: ${msg}`;
+      } else {
+        status.textContent = "Saved. Runtime settings updated.";
+        await tick();
+      }
+    } catch (err) {
+      status.textContent = "Save failed: network error";
+    } finally {
+      saveBtn.disabled = false;
+    }
+  });
+
+  return card;
+}
+
 /* A rect with only its top corners rounded: the data-end is rounded, the
    baseline end stays square. */
 function topRoundedPath(x, y, w, h, r) {
@@ -578,6 +709,19 @@ function localSavedTokensEst(row) {
   const before = Number(row.est_tokens_before || 0);
   const after = Number(row.est_tokens_after || 0);
   return Math.max(0, before - after);
+}
+
+function hasBeforeAfterEstimates(row) {
+  const before = Number(row.est_tokens_before);
+  const after = Number(row.est_tokens_after);
+  return Number.isFinite(before) && before >= 0 && Number.isFinite(after) && after >= 0;
+}
+
+function reductionPct(row) {
+  const before = Number(row.est_tokens_before || 0);
+  const after = Number(row.est_tokens_after || 0);
+  if (before <= 0) return 0;
+  return Math.max(0, 1 - after / before);
 }
 
 function stackedChart(rows) {
@@ -874,6 +1018,9 @@ function render(d) {
     </div>`).join("");
   main.appendChild(kpis);
 
+  // Live settings panel.
+  main.appendChild(configCard(d.config || {}));
+
   // Chart 1 -- token composition (part-to-whole over time).
   const c1 = document.createElement("div");
   c1.className = "card chart-card";
@@ -900,28 +1047,28 @@ function render(d) {
   ]));
   main.appendChild(c1);
 
-  // Chart 2 -- before/after per filtered request (dumbbell).
-  const filtered = rows.filter(r => r.blocks_filtered > 0 && r.est_tokens_before);
+  // Chart 2 -- before/after per eligible request (dumbbell), including zero-trim rows.
+  const compared = rows.filter(hasBeforeAfterEstimates);
   const c2 = document.createElement("div");
   c2.className = "card chart-card";
   c2.innerHTML = `<div class="chart-head"><h2>Held locally → sent upstream</h2></div>
-    <p class="chart-sub">${filtered.length
-      ? "Each row is one filtered request: estimated context before filtering, and what was actually sent."
-      : "No filtered requests yet. In shadow mode nothing is removed — start with <code>--mode prune</code> to populate this."}</p>`;
-  if (filtered.length) {
+    <p class="chart-sub">${compared.length
+      ? "Each row is one request with estimates: modeled context before smart-context versus what was sent upstream. Rows with no savings are included so you can spot weak cache/pruning effectiveness."
+      : "No comparable requests yet. Once requests with before/after estimates are logged, they will appear here."}</p>`;
+  if (compared.length) {
     c2.appendChild(legend([
       { css: "--before", label: "Held locally (before)" },
       { css: "--after",  label: "Sent to Claude (after)" },
     ]));
     const scroll2 = document.createElement("div");
     scroll2.className = "scroll";
-    scroll2.appendChild(dumbbellChart(filtered.slice(-14)));
+    scroll2.appendChild(dumbbellChart(compared.slice(-14)));
     c2.appendChild(scroll2);
-    c2.appendChild(tableView(filtered, [
+    c2.appendChild(tableView(compared, [
       ["Time", r => new Date(r.ts*1000).toLocaleTimeString()],
       ["Before (est)", r => fmt(r.est_tokens_before)],
       ["After (est)", r => fmt(r.est_tokens_after)],
-      ["Reduction", r => ((1 - r.est_tokens_after / r.est_tokens_before) * 100).toFixed(1) + "%"],
+      ["Reduction", r => pct(reductionPct(r))],
       ["Blocks", r => fmt(r.blocks_filtered)],
     ]));
   }
@@ -931,16 +1078,16 @@ function render(d) {
   cCost.className = "card chart-card";
   cCost.innerHTML = `<div class="chart-head"><h2>Prompt cost impact</h2></div>
     <p class="chart-sub">Per request, estimated prompt-input cost without smart-context versus with smart-context, priced from the actual logged upstream model for that request. Uses observed fresh/cache-read/cache-write usage; output-token billing is excluded.</p>`;
-  if (filtered.length) {
+  if (compared.length) {
     cCost.appendChild(legend([
-      { css: "--before", label: "Before pruning" },
-      { css: "--after", label: "After pruning" },
+      { css: "--before", label: "Without smart-context (est.)" },
+      { css: "--after", label: "With smart-context (est.)" },
     ]));
     const scrollCost = document.createElement("div");
     scrollCost.className = "scroll";
-    scrollCost.appendChild(costDumbbellChart(filtered.slice(-14)));
+    scrollCost.appendChild(costDumbbellChart(compared.slice(-14)));
     cCost.appendChild(scrollCost);
-    cCost.appendChild(tableView(filtered, [
+    cCost.appendChild(tableView(compared, [
       ["Time", r => new Date(r.ts*1000).toLocaleTimeString()],
       ["Price basis", r => `${r.est_price_family || "sonnet"} · $${(r.est_input_price_per_mtoken_usd || 0).toFixed(2)}/M input tokens`],
       ["Without smart-context (est.)", r => usd(r.prompt_cost_without_usd)],
@@ -949,7 +1096,7 @@ function render(d) {
       ["Savings % (est.)", r => pct(r.prompt_cost_saved_pct)],
     ]));
   } else {
-    cCost.innerHTML += `<div class="detail-empty">No filtered requests yet.</div>`;
+    cCost.innerHTML += `<div class="detail-empty">No comparable requests yet.</div>`;
   }
   main.appendChild(cCost);
 

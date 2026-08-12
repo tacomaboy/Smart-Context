@@ -205,7 +205,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, help="override SMARTCONTEXT_PORT")
     serve.add_argument(
         "--min-chars", type=int, default=None,
-        help="override SMARTCONTEXT_MIN_BLOCK_CHARS (blocks smaller than this are never touched)",
+        help="override SMARTCONTEXT_MIN_BLOCK_CHARS (minimum block size to consider; set 0 for no floor)",
     )
     serve.add_argument(
         "--capture", action="store_true",
@@ -232,8 +232,8 @@ def build_parser() -> argparse.ArgumentParser:
         "sweep", help="offline: replay captured payloads through the pruner across thresholds"
     )
     sweep.add_argument(
-        "--min-chars", type=int, nargs="+", default=[500, 1000, 2000, 4000, 8000],
-        help="SMARTCONTEXT_MIN_BLOCK_CHARS values to try (default: 500 1000 2000 4000 8000)",
+        "--min-chars", type=int, nargs="+", default=[0, 500, 1000, 2000, 4000, 8000],
+        help="SMARTCONTEXT_MIN_BLOCK_CHARS values to try (default: 0 500 1000 2000 4000 8000)",
     )
     sweep.add_argument(
         "--keep-budget", type=int, nargs="+", default=None,

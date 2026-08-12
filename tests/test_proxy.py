@@ -192,8 +192,61 @@ def test_dashboard_data_shape(harness):
     assert body["elided_tokens_est"] == 0
     assert body["stats"]["est_prompt_cost_before_usd"] == 0.0
     assert body["stats"]["est_prompt_cost_after_usd"] == 0.0
+    assert body["config"]["min_block_chars"] == 0
+    assert body["config"]["max_tools"] == 64
     assert len(body["timeline"]) == 1
     assert body["timeline"][0]["cache_read_tokens"] == 40_000
+
+
+def test_runtime_config_endpoint_exposes_current_values(harness):
+    client, _, _ = harness
+    body = client.get("/_smartcontext/config").json()
+    assert body["ok"] is True
+    assert body["config"]["mode"] == "shadow"
+    assert body["config"]["min_block_chars"] == 0
+
+
+def test_runtime_config_endpoint_applies_updates_live(harness):
+    client, _, app = harness
+    resp = client.post(
+        "/_smartcontext/config",
+        json={
+            "mode": "prune",
+            "min_block_chars": 123,
+            "keep_budget_chars": 777,
+            "chunk_chars": 333,
+            "trim_tools": False,
+            "max_tools": 9,
+            "trim_tools_retry_missing": False,
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["config"]["mode"] == "prune"
+    assert body["config"]["min_block_chars"] == 123
+    assert body["config"]["keep_budget_chars"] == 777
+    assert body["config"]["chunk_chars"] == 333
+    assert body["config"]["trim_tools"] is False
+    assert body["config"]["max_tools"] == 9
+    assert body["config"]["trim_tools_retry_missing"] is False
+
+    assert app.state.settings.mode == "prune"
+    assert app.state.settings.min_block_chars == 123
+    assert app.state.settings.keep_budget_chars == 777
+    assert app.state.settings.chunk_chars == 333
+    assert app.state.settings.trim_tools is False
+    assert app.state.settings.max_tools == 9
+    assert app.state.settings.trim_tools_retry_missing is False
+
+
+def test_runtime_config_endpoint_rejects_invalid_values(harness):
+    client, _, app = harness
+    before = app.state.settings.min_block_chars
+    resp = client.post("/_smartcontext/config", json={"min_block_chars": -1})
+    assert resp.status_code == 400
+    assert resp.json()["ok"] is False
+    assert app.state.settings.min_block_chars == before
 
 
 def test_effective_multiplier_is_one_when_nothing_is_elided(harness):

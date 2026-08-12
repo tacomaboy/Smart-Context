@@ -45,8 +45,8 @@ class Settings:
 
     data_dir: Path = field(default_factory=lambda: Path(os.environ.get("SMARTCONTEXT_DATA_DIR", Path.home() / ".smartcontext")))
 
-    # Blocks smaller than this are never touched -- the risk isn't worth the tokens.
-    min_block_chars: int = 4000
+    # Minimum block size to consider for filtering. Set to 0 for no floor.
+    min_block_chars: int = 0
     # Target size for the kept portion of a filtered block.
     keep_budget_chars: int = 1500
     chunk_chars: int = 900
@@ -81,7 +81,7 @@ class Settings:
             upstream=os.environ.get("SMARTCONTEXT_UPSTREAM", DEFAULT_UPSTREAM).rstrip("/"),
             host=os.environ.get("SMARTCONTEXT_HOST", "127.0.0.1"),
             port=_env_int("SMARTCONTEXT_PORT", 4711),
-            min_block_chars=_env_int("SMARTCONTEXT_MIN_BLOCK_CHARS", 4000),
+            min_block_chars=_env_int("SMARTCONTEXT_MIN_BLOCK_CHARS", 0),
             keep_budget_chars=_env_int("SMARTCONTEXT_KEEP_BUDGET_CHARS", 1500),
             chunk_chars=_env_int("SMARTCONTEXT_CHUNK_CHARS", 900),
             local_model=os.environ.get("SMARTCONTEXT_LOCAL_MODEL", "gemma3:12b"),
