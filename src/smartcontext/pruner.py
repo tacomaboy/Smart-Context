@@ -308,9 +308,9 @@ class _Replaced:
 
 # thinking/redacted_thinking are deliberately excluded: they carry a
 # cryptographic signature over their exact bytes, and rewriting one is a hard
-# 400 from the API. image/document/tool_use/text blocks are excluded because
-# either they aren't tool-result payloads or they are user-authored text.
-_FILTERABLE_TYPES = {"tool_result"}
+# 400 from the API. image/document/tool_use blocks are excluded because they
+# either aren't text or would break tool call replay if shrunk.
+_FILTERABLE_TYPES = {"tool_result", "text"}
 
 
 def _is_filterable(block: Any, min_chars: int, allow_cache_control: bool = False) -> bool:

@@ -135,12 +135,12 @@ async def test_fails_open_when_local_model_is_down(settings, store):
 async def test_cache_control_blocks_in_newest_turn_can_still_be_filtered(settings, store):
     """Newest-turn cache_control blocks can be trimmed and should keep the marker."""
     pruner = Pruner(settings, store, FakeLocal())
-    payload = payload_with_tool_result(cache_control={"type": "ephemeral"})
+    payload = payload_with_tool_result(cache_control={"type": "ephemeral", "ttl": "1h"})
     result = await pruner.prune(payload, "sess1")
 
     assert result.modified
     block = result.payload["messages"][-1]["content"][0]
-    assert block["cache_control"] == {"type": "ephemeral"}
+    assert block["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
 
 
 async def test_cache_control_blocks_in_earlier_turns_are_still_skipped(settings, store):
@@ -227,7 +227,7 @@ async def test_assistant_tail_does_not_block_filtering_elsewhere(settings, store
     assert result.modified
 
 
-async def test_oversized_text_block_is_not_shrunk(settings, store):
+async def test_oversized_text_block_is_shrunk(settings, store):
     payload = {
         "model": "claude-opus-5",
         "system": "You are a helpful assistant.",
@@ -238,8 +238,10 @@ async def test_oversized_text_block_is_not_shrunk(settings, store):
     pruner = Pruner(settings, store, FakeLocal())
     result = await pruner.prune(payload, "sess1")
 
-    assert not result.modified
-    assert result.payload == payload
+    assert result.modified
+    text = result.payload["messages"][-1]["content"][0]["text"]
+    assert "smart-context" in text
+    assert result.handles[0] in text
 
 
 async def test_thinking_blocks_are_never_touched(settings, store):
