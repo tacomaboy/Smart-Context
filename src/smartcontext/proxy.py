@@ -57,6 +57,7 @@ def _runtime_config_snapshot(settings: Settings) -> dict[str, Any]:
         "trim_tools": settings.trim_tools,
         "max_tools": settings.max_tools,
         "trim_tools_retry_missing": settings.trim_tools_retry_missing,
+        "scan_scope": settings.scan_scope,
     }
 
 
@@ -159,6 +160,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 updates["trim_tools_retry_missing"] = _coerce_bool(
                     "trim_tools_retry_missing", body["trim_tools_retry_missing"]
                 )
+            if "scan_scope" in body:
+                scan_scope = str(body["scan_scope"]).strip().lower()
+                if scan_scope not in {"tail", "full"}:
+                    raise ValueError("scan_scope must be 'tail' or 'full'")
+                updates["scan_scope"] = scan_scope
         except ValueError as exc:
             return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
 

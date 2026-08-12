@@ -57,6 +57,42 @@ def load_captures(captures_dir: Path) -> list[dict[str, Any]]:
     return payloads
 
 
+def load_capture_sessions(captures_dir: Path) -> list[list[dict[str, Any]]]:
+    """Captures grouped back into the conversations they came from.
+
+    Capture files are named ``{time_ns}_{session_key}.json``, so the lineage of
+    a real conversation -- one prefix growing turn by turn -- is already on
+    disk. Replaying a group in order is the only way to observe prompt-cache
+    behaviour; a single one-shot payload can never show it.
+
+    Returns one list of payloads per session, each ordered oldest-first, longest
+    session first. Single-capture sessions are dropped -- one turn cannot
+    demonstrate a warm prefix.
+    """
+    sessions: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for f in sorted(captures_dir.glob("*.json")):
+        ts_text, _, session_key = f.stem.partition("_")
+        if not session_key:
+            continue
+        try:
+            ts = int(ts_text)
+        except ValueError:
+            continue
+        try:
+            payload = json.loads(f.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+            continue
+        sessions.setdefault(session_key, []).append((ts, payload))
+
+    grouped = [
+        [payload for _ts, payload in sorted(turns, key=lambda item: item[0])]
+        for turns in sessions.values()
+        if len(turns) > 1
+    ]
+    grouped.sort(key=len, reverse=True)
+    return grouped
+
+
 async def run_sweep(
     payloads: list[dict[str, Any]],
     base_settings: Settings,

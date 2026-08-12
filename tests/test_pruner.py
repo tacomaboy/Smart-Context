@@ -122,6 +122,48 @@ async def test_earlier_oversized_tool_result_is_not_filtered(settings, store):
     assert result.payload == payload
 
 
+async def test_full_scope_filters_earlier_turns(settings, store):
+    """scan_scope='full' restores whole-history filtering: the very block that
+    tail mode leaves alone is trimmed here."""
+    settings.scan_scope = "full"
+    payload = payload_with_tool_result()
+    payload["messages"].append({"role": "assistant", "content": [{"type": "text", "text": "ok"}]})
+    payload["messages"].append({"role": "user", "content": [{"type": "text", "text": "and now?"}]})
+    big_index = len(payload["messages"]) - 3
+
+    pruner = Pruner(settings, store, FakeLocal())
+    result = await pruner.prune(payload, "sess1")
+
+    assert result.modified
+    assert result.blocks_filtered == 1
+    # The historical block was rewritten; the original payload is untouched.
+    assert result.payload["messages"][big_index] != payload["messages"][big_index]
+    assert result.est_after < result.est_before
+
+
+async def test_full_scope_still_skips_earlier_cache_control(settings, store):
+    """Widening the scope must not override the cache_control guard on history."""
+    settings.scan_scope = "full"
+    payload = {
+        "model": "claude-opus-5",
+        "system": "You are a helpful assistant.",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_old", "content": BIG, "cache_control": {"type": "ephemeral"}},
+                ],
+            },
+            {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+            {"role": "user", "content": [{"type": "text", "text": "and now?"}]},
+        ],
+    }
+    pruner = Pruner(settings, store, FakeLocal())
+    result = await pruner.prune(payload, "sess1")
+
+    assert result.payload["messages"][0]["content"][0]["content"] == BIG
+
+
 async def test_fails_open_when_local_model_is_down(settings, store):
     """Ollama being unreachable must degrade to passthrough, never to an error."""
     pruner = Pruner(settings, store, FakeLocal(fail=True))

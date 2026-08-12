@@ -17,7 +17,13 @@ from smartcontext.config import Settings
 from smartcontext.local_model import LocalDecision
 from smartcontext.pruner import estimate_payload_tokens
 from smartcontext import sweep as sweep_mod
-from smartcontext.sweep import SweepPoint, format_table, load_captures, run_sweep
+from smartcontext.sweep import (
+    SweepPoint,
+    format_table,
+    load_capture_sessions,
+    load_captures,
+    run_sweep,
+)
 
 BIG = "\n".join(f"line {i} some reasonably wordy filler content here" for i in range(400))
 
@@ -66,6 +72,41 @@ def test_load_captures_reads_json_files(tmp_path):
     payloads = load_captures(tmp_path)
 
     assert len(payloads) == 2
+
+
+def test_load_capture_sessions_groups_by_session_in_time_order(tmp_path):
+    """Capture filenames carry {time_ns}_{session_key}, so real conversation
+    lineage is recoverable -- that is what makes a warm-prefix replay possible."""
+    def write(ts: int, session: str, marker: str) -> None:
+        (tmp_path / f"{ts}_{session}.json").write_text(
+            json.dumps(make_payload(marker)), encoding="utf-8"
+        )
+
+    # Written out of order on purpose; grouping must sort by timestamp.
+    write(300, "sessA", "a-third")
+    write(100, "sessA", "a-first")
+    write(200, "sessA", "a-second")
+    write(150, "sessB", "b-first")
+    write(250, "sessB", "b-second")
+    write(999, "solo", "only-one")
+
+    sessions = load_capture_sessions(tmp_path)
+
+    # Longest session first; the single-capture session is dropped entirely.
+    assert [len(s) for s in sessions] == [3, 2]
+
+    def marker(payload):
+        return payload["messages"][-1]["content"][0]["content"]
+
+    assert [marker(p) for p in sessions[0]] == ["a-first", "a-second", "a-third"]
+    assert [marker(p) for p in sessions[1]] == ["b-first", "b-second"]
+
+
+def test_load_capture_sessions_ignores_unparseable_names(tmp_path):
+    (tmp_path / "no-timestamp_sessA.json").write_text(json.dumps(make_payload()), encoding="utf-8")
+    (tmp_path / "nounderscore.json").write_text(json.dumps(make_payload()), encoding="utf-8")
+
+    assert load_capture_sessions(tmp_path) == []
 
 
 def test_load_captures_skips_malformed_files(tmp_path):

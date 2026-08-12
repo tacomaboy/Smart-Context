@@ -15,11 +15,16 @@ import pytest
 from smartcontext import bakeoff as bakeoff_mod
 from smartcontext.bakeoff import (
     CandidateRun,
+    ReplayTurn,
     _parse_verdict,
     estimate_plan,
+    estimate_replay_plan,
+    format_replay_table,
     format_table,
     run_bakeoff,
+    run_replay,
     summarize,
+    summarize_replay,
 )
 from smartcontext.config import Settings
 from smartcontext.local_model import LocalDecision
@@ -140,6 +145,46 @@ def test_estimate_plan_counts_scale_with_captures_and_models():
     assert plan["est_cost_usd"] > 0
 
 
+def test_estimate_plan_scales_with_scan_scopes():
+    """Each (model, scope) pair is a separate candidate, so listing both scopes
+    doubles the billed candidate and judge calls."""
+    payloads = [make_payload(), make_payload()]
+    models = ["m1", "m2"]
+
+    tail_only = estimate_plan(payloads, models, ["tail"])
+    both = estimate_plan(payloads, models, ["tail", "full"])
+
+    assert tail_only["candidates"] == 2
+    assert both["candidates"] == 4
+    # Baselines are per-capture and shared across candidates, so they don't scale.
+    assert both["baseline_calls"] == tail_only["baseline_calls"]
+    assert both["candidate_calls"] == 2 * tail_only["candidate_calls"]
+    assert both["judge_calls"] == 2 * tail_only["judge_calls"]
+    assert both["est_cost_usd"] > tail_only["est_cost_usd"]
+
+
+def test_summarize_separates_scan_scopes():
+    """tail and full runs of the same model must not be averaged together --
+    that is the whole point of the comparison."""
+    runs = [
+        CandidateRun(model="m", capture_index=0, scan_scope="tail", judge_score=5,
+                     judge_verdict="pass", tokens_before=1000, tokens_after=900),
+        CandidateRun(model="m", capture_index=0, scan_scope="full", judge_score=3,
+                     judge_verdict="fail", tokens_before=1000, tokens_after=400),
+    ]
+
+    summaries = summarize(runs, ["m"], ["tail", "full"])
+
+    assert len(summaries) == 2
+    tail = next(s for s in summaries if s.scan_scope == "tail")
+    full = next(s for s in summaries if s.scan_scope == "full")
+    assert tail.runs == 1 and full.runs == 1
+    assert tail.avg_judge_score == pytest.approx(5.0)
+    assert full.avg_judge_score == pytest.approx(3.0)
+    # full trims harder, which is exactly the trade being measured.
+    assert full.avg_reduction_pct > tail.avg_reduction_pct
+
+
 def test_estimate_plan_is_free_of_side_effects():
     """Must not spend anything or touch the network -- pure arithmetic."""
     payloads = [make_payload()]
@@ -255,10 +300,12 @@ def test_format_table_renders_dashes_for_missing_values():
     from smartcontext.bakeoff import ModelSummary
 
     summaries = [
-        ModelSummary(model="good-model", runs=2, errors=0, avg_trim_latency_ms=120.0,
-                     avg_reduction_pct=60.0, avg_judge_score=4.5, pass_rate=1.0),
-        ModelSummary(model="broken-model", runs=1, errors=1, avg_trim_latency_ms=None,
-                     avg_reduction_pct=0.0, avg_judge_score=None, pass_rate=None),
+        ModelSummary(model="good-model", scan_scope="tail", runs=2, errors=0,
+                     avg_trim_latency_ms=120.0, avg_reduction_pct=60.0,
+                     avg_judge_score=4.5, pass_rate=1.0),
+        ModelSummary(model="broken-model", scan_scope="full", runs=1, errors=1,
+                     avg_trim_latency_ms=None, avg_reduction_pct=0.0,
+                     avg_judge_score=None, pass_rate=None),
     ]
 
     table = format_table(summaries)
@@ -267,3 +314,103 @@ def test_format_table_renders_dashes_for_missing_values():
     assert "broken-model" in table
     assert "4.50" in table
     assert "—" in table
+    # The scope axis has to be visible, or tail/full rows are indistinguishable.
+    assert "tail" in table
+    assert "full" in table
+
+
+# --------------------------------------------------------------------- replay
+
+
+class CountingLocal(FakeLocal):
+    """Counts select_chunks calls so a test can prove decisions were memoised."""
+
+    calls = 0
+
+    async def select_chunks(self, task, chunks, keep_at_least=1):
+        type(self).calls += 1
+        return LocalDecision(keep=[0], model="fake")
+
+
+def test_estimate_replay_plan_scales_with_arms():
+    session = [make_payload(), make_payload(), make_payload()]
+
+    one = estimate_replay_plan(session, ["m1"], ["off"])
+    three = estimate_replay_plan(session, ["m1"], ["off", "tail", "full"])
+
+    assert one["arms"] == 1
+    assert three["arms"] == 3
+    assert one["total_live_calls"] == 3
+    assert three["total_live_calls"] == 9
+    assert three["est_cost_usd"] > one["est_cost_usd"]
+
+
+async def test_replay_shares_one_store_across_turns(settings, monkeypatch):
+    """The whole point of a replay is a stable prefix. Decisions memoise by
+    content hash, so an identical block appearing in consecutive turns must be
+    decided exactly once -- re-deciding would rewrite the prefix each turn and
+    destroy the cache behaviour being measured."""
+    CountingLocal.calls = 0
+    monkeypatch.setattr(bakeoff_mod, "LocalModel", CountingLocal)
+
+    session = [make_payload(), make_payload()]
+    client = FakeClient()
+
+    summaries = await run_replay(session, ["m1"], settings, client, scopes=["tail"])
+
+    assert len(summaries) == 1
+    assert summaries[0].turns == 2
+    assert summaries[0].errors == 0
+    assert CountingLocal.calls == 1
+
+
+async def test_replay_off_arm_sends_payloads_unmodified(settings):
+    """The baseline arm must be a true do-nothing control."""
+    session = [make_payload(), make_payload()]
+    client = FakeClient()
+
+    summaries = await run_replay(session, ["m1"], settings, client, scopes=["off"])
+
+    assert summaries[0].scan_scope == "off"
+    assert summaries[0].avg_reduction_pct == 0.0
+    for sent in client.messages.stream_calls:
+        assert sent["messages"] == session[0]["messages"]
+
+
+def test_summarize_replay_prices_reads_and_writes():
+    """rel cost = fresh x1.0 + cache read x0.1 + cache write x1.25 (5m)."""
+    turns = [
+        ReplayTurn(scan_scope="tail", turn_index=0, tokens_before=1000, tokens_after=800,
+                   input_tokens=100, cache_read_input_tokens=1000,
+                   cache_creation_input_tokens=200),
+    ]
+
+    s = summarize_replay("m1", "tail", turns, [make_payload()], ttl="5m")
+
+    assert s.input_tokens == 100
+    assert s.cache_read_tokens == 1000
+    assert s.cache_write_tokens == 200
+    assert s.relative_input_cost == pytest.approx(100 + 100 + 250)
+    assert s.avg_reduction_pct == pytest.approx(20.0)
+
+
+def test_summarize_replay_charges_more_for_1h_writes():
+    turns = [ReplayTurn(scan_scope="full", turn_index=0, cache_creation_input_tokens=1000)]
+
+    five_min = summarize_replay("m1", "full", turns, [make_payload()], ttl="5m")
+    one_hour = summarize_replay("m1", "full", turns, [make_payload()], ttl="1h")
+
+    assert one_hour.relative_input_cost > five_min.relative_input_cost
+
+
+def test_format_replay_table_shows_every_arm():
+    summaries = [
+        summarize_replay("m1", scope, [ReplayTurn(scan_scope=scope, turn_index=0)], [make_payload()])
+        for scope in ("off", "tail", "full")
+    ]
+
+    table = format_replay_table(summaries)
+
+    for scope in ("off", "tail", "full"):
+        assert scope in table
+    assert "cache wr" in table

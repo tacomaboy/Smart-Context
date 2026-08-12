@@ -105,6 +105,7 @@ def cmd_recall(args: argparse.Namespace) -> int:
 def cmd_doctor(_: argparse.Namespace) -> int:
     settings = Settings.from_env()
     print(f"mode:      {settings.mode}")
+    print(f"scope:     {settings.scan_scope}")
     print(f"upstream:  {settings.upstream}")
     print(f"store:     {settings.db_path}")
 
@@ -163,8 +164,11 @@ def cmd_bakeoff(args: argparse.Namespace) -> int:
         print("Run the proxy with --capture (or SMARTCONTEXT_CAPTURE=1) and send some real traffic first.")
         return 1
 
-    plan = estimate_plan(payloads, args.models)
-    print(f"Captures: {plan['captures']}   Candidate models: {plan['models']}")
+    plan = estimate_plan(payloads, args.models, args.scopes)
+    print(
+        f"Captures: {plan['captures']}   Candidate models: {plan['models']}   "
+        f"Scan scopes: {', '.join(args.scopes)}   Candidates: {plan['candidates']}"
+    )
     print(f"  baseline live calls:        {plan['baseline_calls']}")
     print(f"  candidate answer calls:     {plan['candidate_calls']}")
     print(f"  judge calls ({JUDGE_MODEL}): {plan['judge_calls']}")
@@ -183,12 +187,68 @@ def cmd_bakeoff(args: argparse.Namespace) -> int:
         return 1
 
     client = anthropic.AsyncAnthropic()
-    summaries = asyncio.run(run_bakeoff(payloads, args.models, settings, client, on_event=print))
+    summaries = asyncio.run(
+        run_bakeoff(payloads, args.models, settings, client, scopes=args.scopes, on_event=print)
+    )
     print()
     print(format_table(summaries))
     print()
     print("Scores come from a single fixed judge model -- a proxy for")
     print("answer quality, not a guarantee. Judge and target-model calls are live and billed.")
+    return 0
+
+
+def cmd_replay(args: argparse.Namespace) -> int:
+    from .bakeoff import estimate_replay_plan, format_replay_table, run_replay
+    from .sweep import load_capture_sessions
+
+    settings = Settings.from_env()
+    sessions = load_capture_sessions(settings.captures_dir)
+    if not sessions:
+        print(f"No multi-turn capture sessions found in {settings.captures_dir}.")
+        print("Run the proxy with --capture (or SMARTCONTEXT_CAPTURE=1) and hold a real")
+        print("conversation first -- a warm prefix needs at least two turns of one session.")
+        return 1
+
+    if args.session >= len(sessions):
+        print(f"Only {len(sessions)} multi-turn session(s) available (asked for index {args.session}).")
+        return 1
+
+    session = sessions[args.session][: args.limit]
+    if len(session) < 2:
+        print("Need at least 2 turns to demonstrate a warm prefix; raise --limit.")
+        return 1
+
+    plan = estimate_replay_plan(session, args.models, args.scopes)
+    print(f"Session {args.session} of {len(sessions)}   Turns: {plan['turns']}")
+    print(f"  models: {', '.join(args.models)}")
+    print(f"  scopes: {', '.join(args.scopes)}   arms: {plan['arms']}")
+    print(f"  total live API calls:  {plan['total_live_calls']}")
+    print(f"  rough cost estimate:   ${plan['est_cost_usd']:.2f}  (worst case, assumes zero cache hits)")
+
+    if not args.yes:
+        print()
+        print("This spends real money on live Claude API calls. Re-run with --yes to proceed.")
+        return 0
+
+    try:
+        import anthropic
+    except ImportError:
+        print("The 'anthropic' package is required for replay. Install with: pip install 'smart-context[bakeoff]'")
+        return 1
+
+    client = anthropic.AsyncAnthropic()
+    summaries = asyncio.run(
+        run_replay(session, args.models, settings, client,
+                   scopes=args.scopes, ttl=args.ttl, on_event=print)
+    )
+    print()
+    print(format_replay_table(summaries))
+    print()
+    print("'rel cost' is input cost in units of one uncached input token:")
+    print("  fresh x1.0 + cache read x0.1 + cache write x1.25 (5m) or x2.0 (1h).")
+    print("Lower wins. Compare each scope against the 'off' arm -- if a scope trims more")
+    print("but scores a higher rel cost, it bought reduction with cache invalidation.")
     return 0
 
 
@@ -249,6 +309,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Ollama model tags to compare, e.g. --models qwen3-coder:latest llama3.2:3b",
     )
     bakeoff.add_argument(
+        "--scopes", nargs="+", choices=["tail", "full"], default=["tail"],
+        help=(
+            "scan scopes to compare, e.g. --scopes tail full. Each (model, scope) pair "
+            "is scored separately, so listing both doubles the live API spend."
+        ),
+    )
+    bakeoff.add_argument(
         "--limit", type=int, default=5,
         help="max number of captures to use (default: 5) -- caps live API spend",
     )
@@ -257,6 +324,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="actually fire the live API calls; without this, only print the cost estimate",
     )
     bakeoff.set_defaults(func=cmd_bakeoff)
+
+    replay = sub.add_parser(
+        "replay",
+        help="live: replay one captured conversation turn by turn to measure real cache cost",
+    )
+    replay.add_argument(
+        "--models", nargs="+", required=True,
+        help="Ollama model tags to replay with, e.g. --models gemma3:12b",
+    )
+    replay.add_argument(
+        "--scopes", nargs="+", choices=["off", "tail", "full"], default=["off", "tail", "full"],
+        help="arms to compare; 'off' sends every turn unmodified as the baseline",
+    )
+    replay.add_argument(
+        "--session", type=int, default=0,
+        help="which captured session to replay, 0 = longest (default: 0)",
+    )
+    replay.add_argument(
+        "--limit", type=int, default=8,
+        help="max turns to replay from that session (default: 8) -- caps live API spend",
+    )
+    replay.add_argument(
+        "--ttl", choices=["5m", "1h"], default="5m",
+        help="cache TTL to price writes at (default: 5m)",
+    )
+    replay.add_argument(
+        "--yes", action="store_true",
+        help="actually fire the live API calls; without this, only print the cost estimate",
+    )
+    replay.set_defaults(func=cmd_replay)
 
     return parser
 

@@ -12,8 +12,15 @@ Three invariants, in priority order. Correctness beats savings every time:
    over their exact bytes -- rewriting one is a hard 400 from the API, so
    they are excluded by construction (not in ``_FILTERABLE_TYPES``).
 
-Only the newest user turn is scanned. Earlier turns are left byte-identical so
-cacheable prefixes stay stable.
+How much is scanned depends on ``scan_scope``:
+
+* ``tail`` (default) -- only the newest user turn. Earlier turns are left
+  byte-identical so cacheable prefixes stay stable.
+* ``full`` -- every message, as the original release did. This reduces context
+  far more aggressively, at the cost of rewriting the cached prefix: downstream
+  reads (0.1x) become writes (1.25x). Whether that trade pays depends on how
+  much of the history is genuinely filterable, so it is a measured choice --
+  watch ``relative_input_cost`` in ``smart-context stats``.
 
 Blocks carrying ``cache_control`` in older turns are still skipped outright --
 those mark cache breakpoints the client placed, and rewriting one changes
@@ -142,8 +149,9 @@ class Pruner:
             result.note = "no messages"
             return result
 
-        # (message_index, block_index) for every oversized, filterable block
-        # in the newest user turn only.
+        # (message_index, block_index) for every oversized, filterable block in
+        # scope. `scan_scope` decides how wide that is: "tail" limits it to the
+        # newest user turn, "full" scans the whole conversation.
         targets: list[tuple[int, int]] = []
         latest_user_index: int | None = None
         for m_index in range(len(messages) - 1, -1, -1):
@@ -154,18 +162,34 @@ class Pruner:
                 latest_user_index = m_index
                 break
 
-        if latest_user_index is None:
-            result.note = "no user content list"
-            return result
-
-        content = messages[latest_user_index].get("content")
-        if not isinstance(content, list):
-            result.note = "no user content list"
-            return result
-
-        for b_index, block in enumerate(content):
-            if _is_filterable(block, self.settings.min_block_chars, allow_cache_control=True):
-                targets.append((latest_user_index, b_index))
+        if self.settings.scan_scope == "full":
+            # Earlier turns keep the cache_control guard: those markers are
+            # placed by the client, and rewriting one changes bytes it is
+            # relying on to stay put. The newest user turn is exempt, exactly
+            # as in tail mode -- it is rewritten either way.
+            for m_index, message in enumerate(messages):
+                if not isinstance(message, dict):
+                    continue
+                content = message.get("content")
+                if not isinstance(content, list):
+                    continue
+                allow_cc = m_index == latest_user_index
+                for b_index, block in enumerate(content):
+                    if _is_filterable(
+                        block, self.settings.min_block_chars, allow_cache_control=allow_cc
+                    ):
+                        targets.append((m_index, b_index))
+        else:
+            if latest_user_index is None:
+                result.note = "no user content list"
+                return result
+            content = messages[latest_user_index].get("content")
+            if not isinstance(content, list):
+                result.note = "no user content list"
+                return result
+            for b_index, block in enumerate(content):
+                if _is_filterable(block, self.settings.min_block_chars, allow_cache_control=True):
+                    targets.append((latest_user_index, b_index))
 
         if not targets:
             result.note = "no oversized filterable blocks"

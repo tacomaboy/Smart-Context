@@ -95,6 +95,7 @@
 
   #theme-btn { margin-left: auto; min-width: 88px; }
   #cost-help-btn { margin-left: 0; }
+  #settings-btn { margin-left: 0; }
   #reset-btn { margin-left: 0; }
 
   .card {
@@ -263,6 +264,7 @@
     <span class="badge" id="model-badge">—</span>
     <button class="btn" id="theme-btn" title="Switch dashboard theme">Theme: Auto</button>
     <button class="btn icon" id="cost-help-btn" title="How cache billing and cost calculations work" aria-label="Cost help">?</button>
+    <button class="btn" id="settings-btn" title="Tune pruning and tool-catalog limits live">Settings</button>
     <button class="btn" id="reset-btn" title="Clear logged request history. Stored/recallable chunks are kept unless Shift-clicked.">Reset stats</button>
   </header>
   <p class="sub">Local context held versus context actually sent to the Claude API.</p>
@@ -573,8 +575,13 @@ function openCostHelpModal() {
   openModal("How cache billing and cost calculations work");
 }
 
-function configCard(config) {
+/* Latest runtime config from the last tick, so the settings modal always
+   opens showing current values. */
+let latestConfig = {};
+
+function settingsPanel(config) {
   const mode = String(config?.mode || "prune");
+  const scanScope = String(config?.scan_scope || "tail");
   const trimTools = !!config?.trim_tools;
   const retryMissing = !!config?.trim_tools_retry_missing;
   const minChars = Number(config?.min_block_chars ?? 0);
@@ -583,9 +590,7 @@ function configCard(config) {
   const maxTools = Number(config?.max_tools ?? 64);
 
   const card = document.createElement("div");
-  card.className = "card chart-card";
   card.innerHTML = `
-    <div class="chart-head"><h2>Dashboard settings</h2></div>
     <p class="chart-sub">Tune pruning and tool-catalog limits live (no restart). Lower text floors can increase savings, but may add more local-model work.</p>
     <div class="config-grid">
       <div class="config-field">
@@ -593,6 +598,13 @@ function configCard(config) {
         <select id="cfg-mode">
           <option value="prune" ${mode === "prune" ? "selected" : ""}>prune</option>
           <option value="shadow" ${mode === "shadow" ? "selected" : ""}>shadow</option>
+        </select>
+      </div>
+      <div class="config-field">
+        <label for="cfg-scan-scope">Scan scope</label>
+        <select id="cfg-scan-scope">
+          <option value="tail" ${scanScope === "tail" ? "selected" : ""}>tail (newest turn, cache-safe)</option>
+          <option value="full" ${scanScope === "full" ? "selected" : ""}>full (whole history, rewrites prefix)</option>
         </select>
       </div>
       <div class="config-field">
@@ -637,6 +649,7 @@ function configCard(config) {
     if (!saveBtn || !status) return;
     const payload = {
       mode: card.querySelector("#cfg-mode")?.value || "prune",
+      scan_scope: card.querySelector("#cfg-scan-scope")?.value || "tail",
       min_block_chars: Number(card.querySelector("#cfg-min-block")?.value || 0),
       keep_budget_chars: Number(card.querySelector("#cfg-keep-budget")?.value || 1500),
       chunk_chars: Number(card.querySelector("#cfg-chunk")?.value || 900),
@@ -669,6 +682,15 @@ function configCard(config) {
   });
 
   return card;
+}
+
+function openSettingsModal() {
+  const panel = document.getElementById("request-detail");
+  if (!panel) return;
+  panel.innerHTML = "";
+  panel.appendChild(settingsPanel(latestConfig));
+  selectedRequestId = null;
+  openModal("Dashboard settings");
 }
 
 /* A rect with only its top corners rounded: the data-end is rounded, the
@@ -1018,8 +1040,9 @@ function render(d) {
     </div>`).join("");
   main.appendChild(kpis);
 
-  // Live settings panel.
-  main.appendChild(configCard(d.config || {}));
+  // Settings live in a modal opened from the header; just keep the latest
+  // config so the form shows current values whenever it is opened.
+  latestConfig = d.config || {};
 
   // Chart 1 -- token composition (part-to-whole over time).
   const c1 = document.createElement("div");
@@ -1170,6 +1193,7 @@ document.getElementById("reset-btn").addEventListener("click", async (ev) => {
 });
 
 document.getElementById("cost-help-btn").addEventListener("click", openCostHelpModal);
+document.getElementById("settings-btn").addEventListener("click", openSettingsModal);
 document.getElementById("theme-btn").addEventListener("click", cycleTheme);
 
 initTheme();

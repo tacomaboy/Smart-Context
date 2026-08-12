@@ -66,6 +66,16 @@ class Settings:
     max_tools: int = 64
     trim_tools_retry_missing: bool = True
 
+    # Which messages are eligible for filtering:
+    #   "tail" -- only the newest user turn. Earlier bytes never change, so
+    #             the upstream prefix stays cacheable (reads bill at 0.1x).
+    #   "full" -- every message. Far more reduction, but rewriting an earlier
+    #             message changes the prefix, turning downstream cache reads
+    #             into writes (1.25x). Whether that trade wins depends on how
+    #             much of the history is actually filterable -- watch
+    #             `relative_input_cost` in `smart-context stats` to judge it.
+    scan_scope: str = "tail"
+
     @property
     def db_path(self) -> Path:
         return self.data_dir / "context.db"
@@ -90,6 +100,7 @@ class Settings:
             trim_tools=_env_bool("SMARTCONTEXT_TRIM_TOOLS", True),
             max_tools=_env_int("SMARTCONTEXT_MAX_TOOLS", 64),
             trim_tools_retry_missing=_env_bool("SMARTCONTEXT_TRIM_TOOLS_RETRY_MISSING", True),
+            scan_scope=os.environ.get("SMARTCONTEXT_SCAN_SCOPE", "tail").strip().lower(),
         )
 
     def validate(self) -> None:
@@ -99,3 +110,7 @@ class Settings:
             raise ValueError("upstream points back at this proxy -- that would loop forever")
         if self.max_tools < 1:
             raise ValueError("SMARTCONTEXT_MAX_TOOLS must be >= 1")
+        if self.scan_scope not in {"tail", "full"}:
+            raise ValueError(
+                f"SMARTCONTEXT_SCAN_SCOPE must be 'tail' or 'full', got {self.scan_scope!r}"
+            )
