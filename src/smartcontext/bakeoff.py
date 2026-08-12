@@ -25,6 +25,7 @@ before spending it -- see ``cli.cmd_bakeoff``.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import tempfile
@@ -411,10 +412,14 @@ async def run_replay(
     client: Any,
     scopes: list[str] | None = None,
     ttl: str = "5m",
+    cooldown_s: float = 0.0,
     on_event: Callable[[str], None] | None = None,
 ) -> list[ReplaySummary]:
     notify = on_event or (lambda _msg: None)
     scopes = list(scopes) if scopes else ["off", "tail", "full"]
+
+    total_arms = len(models) * len(scopes)
+    arm_index = 0
 
     summaries: list[ReplaySummary] = []
     for model in models:
@@ -476,6 +481,21 @@ async def run_replay(
                 store.close()
 
             summaries.append(summarize_replay(model, scope, turns, session, ttl))
+
+            # Arms must not share upstream cache entries. In tail mode the
+            # conversation history is byte-identical across arms, so without a
+            # gap the first arm pays every cold-start write and the rest read
+            # those entries back for free -- which reads as a saving that isn't
+            # real. Waiting past the cache TTL makes each arm start cold and
+            # pay its own way.
+            arm_index += 1
+            if cooldown_s > 0 and arm_index < total_arms:
+                notify(
+                    f"cooling down {cooldown_s:.0f}s so the next arm starts "
+                    "against an expired cache"
+                )
+                await asyncio.sleep(cooldown_s)
+
     return summaries
 
 

@@ -70,9 +70,41 @@ class LocalModel:
                 continue
         return None
 
-    async def available(self) -> bool:
+    async def preflight(self) -> str | None:
+        """Why the local model can't be used, or ``None`` if it can.
+
+        ``_resolve_base`` only proves *something* answered ``/api/tags`` -- the
+        dashboard proxy answers even when the Ollama behind it is gone. This
+        also confirms the configured model is actually pulled, which is the
+        difference between "filtering is off" and "filtering silently did
+        nothing to every block".
+        """
         async with httpx.AsyncClient() as client:
-            return await self._resolve_base(client) is not None
+            base = await self._resolve_base(client)
+            if base is None:
+                endpoints = ", ".join(self._bases)
+                return f"no Ollama endpoint answered on {endpoints} -- start it with: ollama serve"
+            try:
+                resp = await client.get(f"{base}/api/tags", timeout=5.0)
+                names = [m.get("name", "") for m in resp.json().get("models", [])]
+            except Exception as exc:  # noqa: BLE001 - any failure here is a hard stop
+                return f"{base} did not return a usable model list: {exc}"
+
+        if not names:
+            return (
+                f"{base} answered but reported no models -- if that is the dashboard "
+                "proxy, the Ollama behind it is down"
+            )
+        if self.model not in names:
+            available = ", ".join(sorted(n for n in names if n))
+            return (
+                f"model {self.model!r} is not pulled on {base} (available: {available}) "
+                f"-- pull it with: ollama pull {self.model}"
+            )
+        return None
+
+    async def available(self) -> bool:
+        return await self.preflight() is None
 
     async def select_chunks(self, task: str, chunks: list[str], keep_at_least: int = 1) -> LocalDecision | None:
         """Return the indices worth keeping, or ``None`` if the local model is unusable."""

@@ -57,17 +57,11 @@ def load_captures(captures_dir: Path) -> list[dict[str, Any]]:
     return payloads
 
 
-def load_capture_sessions(captures_dir: Path) -> list[list[dict[str, Any]]]:
-    """Captures grouped back into the conversations they came from.
+def load_capture_sessions_keyed(captures_dir: Path) -> list[tuple[str, list[dict[str, Any]]]]:
+    """``load_capture_sessions``, but keeping each session's key.
 
-    Capture files are named ``{time_ns}_{session_key}.json``, so the lineage of
-    a real conversation -- one prefix growing turn by turn -- is already on
-    disk. Replaying a group in order is the only way to observe prompt-cache
-    behaviour; a single one-shot payload can never show it.
-
-    Returns one list of payloads per session, each ordered oldest-first, longest
-    session first. Single-capture sessions are dropped -- one turn cannot
-    demonstrate a warm prefix.
+    The key is what makes a replay reproducible -- positional indexes shift as
+    new captures land, and ties in turn count make them ambiguous.
     """
     sessions: dict[str, list[tuple[int, dict[str, Any]]]] = {}
     for f in sorted(captures_dir.glob("*.json")):
@@ -85,12 +79,28 @@ def load_capture_sessions(captures_dir: Path) -> list[list[dict[str, Any]]]:
         sessions.setdefault(session_key, []).append((ts, payload))
 
     grouped = [
-        [payload for _ts, payload in sorted(turns, key=lambda item: item[0])]
-        for turns in sessions.values()
+        (key, [payload for _ts, payload in sorted(turns, key=lambda item: item[0])])
+        for key, turns in sessions.items()
         if len(turns) > 1
     ]
-    grouped.sort(key=len, reverse=True)
+    # Longest first, then by key so ties are stable across runs.
+    grouped.sort(key=lambda item: (-len(item[1]), item[0]))
     return grouped
+
+
+def load_capture_sessions(captures_dir: Path) -> list[list[dict[str, Any]]]:
+    """Captures grouped back into the conversations they came from.
+
+    Capture files are named ``{time_ns}_{session_key}.json``, so the lineage of
+    a real conversation -- one prefix growing turn by turn -- is already on
+    disk. Replaying a group in order is the only way to observe prompt-cache
+    behaviour; a single one-shot payload can never show it.
+
+    Returns one list of payloads per session, each ordered oldest-first, longest
+    session first. Single-capture sessions are dropped -- one turn cannot
+    demonstrate a warm prefix.
+    """
+    return [payloads for _key, payloads in load_capture_sessions_keyed(captures_dir)]
 
 
 async def run_sweep(

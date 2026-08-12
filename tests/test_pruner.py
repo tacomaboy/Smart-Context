@@ -164,6 +164,52 @@ async def test_full_scope_still_skips_earlier_cache_control(settings, store):
     assert result.payload["messages"][0]["content"][0]["content"] == BIG
 
 
+def payload_with_recalled_block(tool_name: str, text: str = BIG) -> dict:
+    """A turn where Claude asked for elided context and got it back."""
+    return {
+        "model": "claude-opus-5",
+        "system": "You are a helpful assistant.",
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "What was in that file?"}]},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "toolu_recall", "name": tool_name,
+                 "input": {"handle": "sc_abc123"}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_recall", "content": text},
+            ]},
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    ["context_get", "context_recall", "context_recent", "mcp__smart-context__context_get"],
+)
+async def test_recalled_context_is_never_re_trimmed(settings, store, tool_name):
+    """Claude asking for elided text must receive it. Trimming the recall result
+    is a loop: it hands back another handle instead of the content."""
+    pruner = Pruner(settings, store, FakeLocal())
+    payload = payload_with_recalled_block(tool_name)
+
+    result = await pruner.prune(payload, "sess1")
+
+    assert not result.modified
+    assert result.payload["messages"][-1]["content"][0]["content"] == BIG
+
+
+async def test_recall_guard_does_not_spare_ordinary_tool_results(settings, store):
+    """The guard keys on the originating tool, not on size -- a normal oversized
+    tool_result in the same shape must still be filtered."""
+    pruner = Pruner(settings, store, FakeLocal())
+    payload = payload_with_recalled_block("read_file")
+
+    result = await pruner.prune(payload, "sess1")
+
+    assert result.modified
+    assert result.blocks_filtered == 1
+
+
 async def test_fails_open_when_local_model_is_down(settings, store):
     """Ollama being unreachable must degrade to passthrough, never to an error."""
     pruner = Pruner(settings, store, FakeLocal(fail=True))

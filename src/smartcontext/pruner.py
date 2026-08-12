@@ -153,6 +153,7 @@ class Pruner:
         # scope. `scan_scope` decides how wide that is: "tail" limits it to the
         # newest user turn, "full" scans the whole conversation.
         targets: list[tuple[int, int]] = []
+        recall_ids = _recall_tool_use_ids(messages)
         latest_user_index: int | None = None
         for m_index in range(len(messages) - 1, -1, -1):
             message = messages[m_index]
@@ -175,6 +176,8 @@ class Pruner:
                     continue
                 allow_cc = m_index == latest_user_index
                 for b_index, block in enumerate(content):
+                    if _is_recalled(block, recall_ids):
+                        continue
                     if _is_filterable(
                         block, self.settings.min_block_chars, allow_cache_control=allow_cc
                     ):
@@ -188,6 +191,8 @@ class Pruner:
                 result.note = "no user content list"
                 return result
             for b_index, block in enumerate(content):
+                if _is_recalled(block, recall_ids):
+                    continue
                 if _is_filterable(block, self.settings.min_block_chars, allow_cache_control=True):
                     targets.append((latest_user_index, b_index))
 
@@ -335,6 +340,39 @@ class _Replaced:
 # 400 from the API. image/document/tool_use blocks are excluded because they
 # either aren't text or would break tool call replay if shrunk.
 _FILTERABLE_TYPES = {"tool_result", "text"}
+
+# Results from these tools are context this pruner elided and Claude explicitly
+# asked back. Trimming them again is a loop: Claude requests the full text and
+# receives another handle. MCP clients namespace tool names
+# (``mcp__smart-context__context_get``), so match on the suffix.
+_RECALL_TOOL_SUFFIXES = ("context_recall", "context_get", "context_recent")
+
+
+def _recall_tool_use_ids(messages: list[Any]) -> set[str]:
+    """``tool_use`` ids whose results are recalled context, and so off-limits."""
+    ids: set[str] = set()
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            name = str(block.get("name") or "")
+            if name.endswith(_RECALL_TOOL_SUFFIXES):
+                tool_id = block.get("id")
+                if isinstance(tool_id, str):
+                    ids.add(tool_id)
+    return ids
+
+
+def _is_recalled(block: Any, recall_ids: set[str]) -> bool:
+    """True for a tool_result carrying context Claude asked to have restored."""
+    if not recall_ids or not isinstance(block, dict):
+        return False
+    return block.get("tool_use_id") in recall_ids
 
 
 def _is_filterable(block: Any, min_chars: int, allow_cache_control: bool = False) -> bool:

@@ -109,15 +109,16 @@ def cmd_doctor(_: argparse.Namespace) -> int:
     print(f"upstream:  {settings.upstream}")
     print(f"store:     {settings.db_path}")
 
-    available = asyncio.run(
-        LocalModel(settings.local_model, settings.ollama_base, settings.local_timeout_s).available()
+    problem = asyncio.run(
+        LocalModel(settings.local_model, settings.ollama_base, settings.local_timeout_s).preflight()
     )
-    if available:
-        print(f"local LLM: reachable ({settings.local_model})")
+    if problem is None:
+        print(f"local LLM: ready ({settings.local_model})")
     else:
-        print(f"local LLM: UNREACHABLE ({settings.local_model})")
-        print("           The proxy still works -- it forwards requests unfiltered.")
-        print("           Start it with: ollama serve")
+        print(f"local LLM: UNUSABLE ({settings.local_model})")
+        print(f"           {problem}")
+        print("           The proxy still works -- it forwards requests unfiltered,")
+        print("           so nothing breaks, but nothing gets pruned either.")
 
     try:
         store = Store(settings.db_path)
@@ -164,6 +165,16 @@ def cmd_bakeoff(args: argparse.Namespace) -> int:
         print("Run the proxy with --capture (or SMARTCONTEXT_CAPTURE=1) and send some real traffic first.")
         return 1
 
+    # Candidates are local models -- without Ollama every prune is a passthrough
+    # and the bake-off scores nothing. Stop before spending anything.
+    for model in args.models:
+        problem = asyncio.run(
+            LocalModel(model, settings.ollama_base, settings.local_timeout_s).preflight()
+        )
+        if problem:
+            print(f"Local model unusable: {problem}")
+            return 1
+
     plan = estimate_plan(payloads, args.models, args.scopes)
     print(
         f"Captures: {plan['captures']}   Candidate models: {plan['models']}   "
@@ -200,31 +211,80 @@ def cmd_bakeoff(args: argparse.Namespace) -> int:
 
 def cmd_replay(args: argparse.Namespace) -> int:
     from .bakeoff import estimate_replay_plan, format_replay_table, run_replay
-    from .sweep import load_capture_sessions
+    from .sweep import load_capture_sessions_keyed
 
     settings = Settings.from_env()
-    sessions = load_capture_sessions(settings.captures_dir)
-    if not sessions:
+    keyed = load_capture_sessions_keyed(settings.captures_dir)
+    if not keyed:
         print(f"No multi-turn capture sessions found in {settings.captures_dir}.")
         print("Run the proxy with --capture (or SMARTCONTEXT_CAPTURE=1) and hold a real")
         print("conversation first -- a warm prefix needs at least two turns of one session.")
         return 1
 
-    if args.session >= len(sessions):
-        print(f"Only {len(sessions)} multi-turn session(s) available (asked for index {args.session}).")
+    if args.list_sessions:
+        print(f"{'idx':<5}{'session':<20}{'turns':>7}{'max msgs':>10}")
+        print("-" * 42)
+        for i, (key, payloads) in enumerate(keyed):
+            widest = max((len(p.get("messages", [])) for p in payloads), default=0)
+            print(f"{i:<5}{key:<20}{len(payloads):>7}{widest:>10}")
+        return 0
+
+    # --session takes an index or a session key (prefix is enough). Indexes shift
+    # as new captures land and tie on turn count, so the key is the stable handle.
+    selected = None
+    if args.session.isdigit():
+        index = int(args.session)
+        if index < len(keyed):
+            selected = keyed[index]
+    else:
+        matches = [item for item in keyed if item[0].startswith(args.session)]
+        if len(matches) > 1:
+            print(f"{args.session!r} matches {len(matches)} sessions; be more specific.")
+            return 1
+        if matches:
+            selected = matches[0]
+
+    if selected is None:
+        print(f"No session matching {args.session!r}. Run with --list-sessions to see them.")
         return 1
 
-    session = sessions[args.session][: args.limit]
+    session_key, payloads = selected
+    session = payloads[: args.limit]
+    print(f"Replaying session {session_key}")
     if len(session) < 2:
         print("Need at least 2 turns to demonstrate a warm prefix; raise --limit.")
         return 1
 
+    # The `off` arm never touches Ollama; every other arm silently degrades to
+    # passthrough without it, which would make all arms send identical payloads
+    # and the whole comparison meaningless. Stop before spending anything.
+    if any(scope != "off" for scope in args.scopes):
+        for model in args.models:
+            problem = asyncio.run(
+                LocalModel(model, settings.ollama_base, settings.local_timeout_s).preflight()
+            )
+            if problem:
+                print(f"Local model unusable: {problem}")
+                print()
+                print("Pruning would fall back to passthrough on every block, so all arms")
+                print("would send identical payloads and the results would be noise.")
+                return 1
+
     plan = estimate_replay_plan(session, args.models, args.scopes)
-    print(f"Session {args.session} of {len(sessions)}   Turns: {plan['turns']}")
+    print(f"  turns:  {plan['turns']} of {len(payloads)} captured")
     print(f"  models: {', '.join(args.models)}")
     print(f"  scopes: {', '.join(args.scopes)}   arms: {plan['arms']}")
     print(f"  total live API calls:  {plan['total_live_calls']}")
     print(f"  rough cost estimate:   ${plan['est_cost_usd']:.2f}  (worst case, assumes zero cache hits)")
+
+    gaps = max(0, plan["arms"] - 1)
+    if args.cooldown > 0 and gaps:
+        mins = args.cooldown * gaps / 60
+        print(f"  cooldown between arms: {args.cooldown:.0f}s x {gaps} = ~{mins:.0f} min of waiting")
+        print("    (arms share the upstream cache; waiting past its TTL makes each start cold)")
+    elif gaps:
+        print("  cooldown: DISABLED -- arms will share cache entries and the comparison")
+        print("    will favour whichever arm runs last. Only use --cooldown 0 for a single arm.")
 
     if not args.yes:
         print()
@@ -239,8 +299,8 @@ def cmd_replay(args: argparse.Namespace) -> int:
 
     client = anthropic.AsyncAnthropic()
     summaries = asyncio.run(
-        run_replay(session, args.models, settings, client,
-                   scopes=args.scopes, ttl=args.ttl, on_event=print)
+        run_replay(session, args.models, settings, client, scopes=args.scopes,
+                   ttl=args.ttl, cooldown_s=args.cooldown, on_event=print)
     )
     print()
     print(format_replay_table(summaries))
@@ -338,8 +398,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="arms to compare; 'off' sends every turn unmodified as the baseline",
     )
     replay.add_argument(
-        "--session", type=int, default=0,
-        help="which captured session to replay, 0 = longest (default: 0)",
+        "--session", default="0",
+        help=(
+            "which captured session to replay: an index (0 = longest) or a session "
+            "key/prefix. Prefer the key -- indexes shift as new captures land."
+        ),
+    )
+    replay.add_argument(
+        "--list-sessions", action="store_true",
+        help="list the captured sessions with their keys and turn counts, then exit",
     )
     replay.add_argument(
         "--limit", type=int, default=8,
@@ -348,6 +415,14 @@ def build_parser() -> argparse.ArgumentParser:
     replay.add_argument(
         "--ttl", choices=["5m", "1h"], default="5m",
         help="cache TTL to price writes at (default: 5m)",
+    )
+    replay.add_argument(
+        "--cooldown", type=float, default=330.0,
+        help=(
+            "seconds to wait between arms so each starts against an expired cache "
+            "(default: 330, just over the 5m TTL). Without it, arms share cache "
+            "entries and later arms look artificially cheap. 0 disables."
+        ),
     )
     replay.add_argument(
         "--yes", action="store_true",
