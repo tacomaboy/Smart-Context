@@ -55,6 +55,11 @@ class Settings:
     local_timeout_s: float = 20.0
     ollama_base: str | None = None
 
+    # Admin API key (sk-ant-admin01-...) for the real Usage & Cost Admin API --
+    # distinct from a regular API key. Optional: without it, the dashboard's
+    # "actual billing" card just shows a setup hint instead of real numbers.
+    admin_api_key: str | None = None
+
     upstream_timeout_s: float = 600.0
 
     # Off by default: writes every raw request payload to disk, unredacted.
@@ -96,6 +101,13 @@ class Settings:
             chunk_chars=_env_int("SMARTCONTEXT_CHUNK_CHARS", 900),
             local_model=os.environ.get("SMARTCONTEXT_LOCAL_MODEL", "gemma3:12b"),
             ollama_base=os.environ.get("SMARTCONTEXT_OLLAMA_BASE") or None,
+            # Ecosystem-standard name as fallback, so a key already exported
+            # for other Anthropic tooling (e.g. the cookbook examples) just works.
+            admin_api_key=(
+                os.environ.get("SMARTCONTEXT_ADMIN_API_KEY")
+                or os.environ.get("ANTHROPIC_ADMIN_KEY")
+                or None
+            ),
             capture=_env_bool("SMARTCONTEXT_CAPTURE", False),
             trim_tools=_env_bool("SMARTCONTEXT_TRIM_TOOLS", True),
             max_tools=_env_int("SMARTCONTEXT_MAX_TOOLS", 64),

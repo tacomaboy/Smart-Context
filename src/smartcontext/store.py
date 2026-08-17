@@ -311,7 +311,12 @@ class Store:
             after = int(r["est_tokens_after"] or 0)
             tool_saved = int(r["tool_trim_tokens_saved_est"] or 0)
             if before:
-                saved = max(0, before - after) + tool_saved
+                # Signed, not clamped: a tool-catalog trim that forces a
+                # full-catalog retry (see SMARTCONTEXT_TRIM_TOOLS_RETRY_MISSING)
+                # can leave a turn sending *more* tokens than it would have
+                # unpruned. Clamping this to zero would hide that regression
+                # instead of surfacing it.
+                saved = (before - after) + tool_saved
                 tokens_saved += saved
                 unit_price = price_per_token(r["model"])
                 cost_before += (before + tool_saved) * unit_price
@@ -374,8 +379,10 @@ class Store:
             item["est_input_price_per_mtoken_usd"] = round(unit_price * 1_000_000, 2)
             item["est_prompt_cost_before_usd"] = round(before * unit_price, 4)
             item["est_prompt_cost_after_usd"] = round(after * unit_price, 4)
-            item["est_cost_savings_usd"] = round(max(0, before - after) * unit_price, 4)
-            item["est_cost_savings_pct"] = round(max(0, before - after) / before, 4) if before else 0.0
+            # Signed -- see the matching comment in stats(). A negative value
+            # means this request sent more tokens than it would have unpruned.
+            item["est_cost_savings_usd"] = round((before - after) * unit_price, 4)
+            item["est_cost_savings_pct"] = round((before - after) / before, 4) if before else 0.0
             timeline.append(item)
         return timeline
 

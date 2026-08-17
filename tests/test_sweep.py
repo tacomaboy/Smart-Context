@@ -130,6 +130,27 @@ def fake_local_model(monkeypatch):
     monkeypatch.setattr(sweep_mod, "LocalModel", FakeLocal)
 
 
+async def test_run_sweep_preserves_settings_it_does_not_vary(base_settings, monkeypatch):
+    """The sweep varies min_block_chars and keep_budget_chars. Every other setting
+    -- scan_scope especially -- must survive into the Pruner, or the sweep reports
+    numbers for a configuration nobody asked for."""
+    base_settings.scan_scope = "full"
+    seen: list[str] = []
+
+    real_pruner = sweep_mod.Pruner
+
+    class RecordingPruner(real_pruner):
+        def __init__(self, s, store, local):
+            seen.append(s.scan_scope)
+            super().__init__(s, store, local)
+
+    monkeypatch.setattr(sweep_mod, "Pruner", RecordingPruner)
+
+    await run_sweep([make_payload()], base_settings, [1000, 2000])
+
+    assert seen == ["full", "full"]
+
+
 async def test_run_sweep_produces_one_point_per_min_chars_value(base_settings):
     payloads = [make_payload()]
 

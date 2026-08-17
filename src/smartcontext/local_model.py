@@ -95,7 +95,10 @@ class LocalModel:
                 f"{base} answered but reported no models -- if that is the dashboard "
                 "proxy, the Ollama behind it is down"
             )
-        if self.model not in names:
+        # Ollama treats a bare name as the ``:latest`` tag, so `gemma3:12b` and
+        # `nemotron-3.5-lightning` are both valid ways to name a pulled model.
+        wanted = {self.model, self.model if ":" in self.model else f"{self.model}:latest"}
+        if not wanted & set(names):
             available = ", ".join(sorted(n for n in names if n))
             return (
                 f"model {self.model!r} is not pulled on {base} (available: {available}) "

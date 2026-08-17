@@ -30,7 +30,8 @@ import json
 import re
 import tempfile
 import time
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -38,6 +39,7 @@ from .config import Settings
 from .local_model import LocalModel
 from .pruner import Pruner, _recent_task_text, estimate_payload_tokens
 from .store import Store
+from .synth import probe_for_payload, score_answer
 from .tokens import price_per_token, relative_input_cost
 
 # Fixed and never a candidate -- see module docstring on why consistency
@@ -83,6 +85,7 @@ class CandidateRun:
     model: str
     capture_index: int
     scan_scope: str = "tail"
+    min_block_chars: int = 0
     trim_latency_ms: float | None = None
     tokens_before: int = 0
     tokens_after: int = 0
@@ -91,6 +94,17 @@ class CandidateRun:
     judge_score: int | None = None
     judge_verdict: str | None = None
     judge_rationale: str | None = None
+    # Kept so a bad score can be read against what was actually judged. A score
+    # of 1 for "the answer is empty" and a 1 for "it lost the key detail" mean
+    # completely different things, and the number alone can't tell them apart.
+    candidate_answer: str | None = None
+    baseline_answer: str | None = None
+    # Ground truth, when the capture is a synthetic probe with a known answer.
+    # The baseline result is the control: if the unpruned answer misses the fact
+    # too, the model or the question is at fault rather than the pruning.
+    probe_expected: str | None = None
+    probe_hit: bool | None = None
+    baseline_probe_hit: bool | None = None
     error: str | None = None
 
 
@@ -104,15 +118,30 @@ class ModelSummary:
     avg_reduction_pct: float
     avg_judge_score: float | None
     pass_rate: float | None
+    min_block_chars: int = 0
+    # The worst runs, with the judge's reasoning AND the text it judged. An
+    # averaged score says pruning hurt; only the reasoning plus the answers say
+    # whether that is true or whether the run measured nothing.
+    worst_examples: list[CandidateRun] = field(default_factory=list)
+    # Ground truth, on synthetic sessions only. `probes_available` counts the
+    # facts the unpruned baseline got right -- anything below that is a fact
+    # this configuration destroyed.
+    probes_available: int = 0
+    probes_kept: int = 0
+    lost_probes: list[str] = field(default_factory=list)
 
 
 def estimate_plan(
-    payloads: list[dict[str, Any]], models: list[str], scopes: list[str] | None = None
+    payloads: list[dict[str, Any]],
+    models: list[str],
+    scopes: list[str] | None = None,
+    min_chars_values: list[int] | None = None,
 ) -> dict[str, Any]:
     """Pre-flight call count and rough dollar estimate, before spending anything."""
     scopes = list(scopes) if scopes else ["tail"]
-    # One candidate per (model, scan_scope) pair -- that is what gets scored.
-    n, m = len(payloads), len(models) * len(scopes)
+    min_chars_values = list(min_chars_values) if min_chars_values else [0]
+    # One candidate per (model, scan_scope, min_block_chars) -- that is what gets scored.
+    n, m = len(payloads), len(models) * len(scopes) * len(min_chars_values)
     baseline_calls = n
     candidate_calls = n * m
     judge_calls = n * m
@@ -134,6 +163,7 @@ def estimate_plan(
         "captures": n,
         "models": len(models),
         "scopes": len(scopes),
+        "min_chars_values": len(min_chars_values),
         "candidates": m,
         "baseline_calls": baseline_calls,
         "candidate_calls": candidate_calls,
@@ -141,6 +171,40 @@ def estimate_plan(
         "total_live_calls": baseline_calls + candidate_calls + judge_calls,
         "est_cost_usd": round(cost, 2),
     }
+
+
+def save_results(
+    path: Path,
+    *,
+    command: str,
+    invocation: dict[str, Any],
+    summaries: list[Any],
+    runs: list[Any] | None = None,
+) -> Path:
+    """Write a run's results to disk.
+
+    These commands spend real money and print to stdout only, so a closed
+    terminal or a reboot loses the answer entirely. Keeping the per-run detail
+    (judge rationales, both answers, ground-truth hits) means a result can be
+    re-read later without paying for it twice.
+    """
+    payload: dict[str, Any] = {
+        "command": command,
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "invocation": invocation,
+        "summaries": [asdict(s) for s in summaries],
+    }
+    if runs is not None:
+        payload["runs"] = [asdict(r) for r in runs]
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    return path
+
+
+def default_results_path(data_dir: Path, command: str) -> Path:
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return data_dir / "results" / f"{stamp}-{command}.json"
 
 
 def _extract_text(message: Any) -> str:
@@ -210,31 +274,47 @@ async def run_bakeoff(
     settings: Settings,
     client: Any,
     scopes: list[str] | None = None,
+    min_chars_values: list[int] | None = None,
     on_event: Callable[[str], None] | None = None,
+    runs_out: list[CandidateRun] | None = None,
 ) -> list[ModelSummary]:
     notify = on_event or (lambda _msg: None)
     scopes = list(scopes) if scopes else [settings.scan_scope]
+    min_chars_values = list(min_chars_values) if min_chars_values else [settings.min_block_chars]
 
     baselines: list[str | None] = []
     for i, payload in enumerate(payloads):
         notify(f"baseline {i + 1}/{len(payloads)}")
         try:
-            baselines.append(await _get_completion(client, payload))
+            answer = await _get_completion(client, payload)
         except Exception as exc:  # noqa: BLE001 - one bad capture shouldn't kill the run
             notify(f"baseline {i + 1} failed: {exc}")
             baselines.append(None)
+            continue
+        # An agentic capture usually ends with the model calling a tool, not
+        # writing prose -- so there are no text blocks and this comes back "".
+        # Scoring that as a judged answer produces a confident 1 out of 5 for
+        # "the answer is empty", which says nothing about pruning. Treat it as
+        # a missing baseline so it lands in the error column instead.
+        if not answer.strip():
+            notify(f"baseline {i + 1}: no text in response (tool call?) -- capture unusable")
+            baselines.append(None)
+            continue
+        baselines.append(answer)
 
     runs: list[CandidateRun] = []
     for model in models:
         local = LocalModel(model=model, base=settings.ollama_base, timeout_s=settings.local_timeout_s)
-        for scope in scopes:
-            # A per-candidate copy so one scope's setting never leaks into the
-            # next candidate (or back into the caller's settings).
-            scope_settings = replace(settings, scan_scope=scope)
-            label = f"{model} ({scope})"
+        for scope, min_chars in [(s, mc) for s in scopes for mc in min_chars_values]:
+            # A per-candidate copy so one candidate's settings never leak into
+            # the next (or back into the caller's settings).
+            scope_settings = replace(settings, scan_scope=scope, min_block_chars=min_chars)
+            label = f"{model} ({scope}/{min_chars})"
             for i, payload in enumerate(payloads):
                 baseline = baselines[i]
-                run = CandidateRun(model=model, capture_index=i, scan_scope=scope)
+                run = CandidateRun(
+                    model=model, capture_index=i, scan_scope=scope, min_block_chars=min_chars
+                )
                 if baseline is None:
                     run.error = "no baseline answer to compare against"
                     runs.append(run)
@@ -246,7 +326,7 @@ async def run_bakeoff(
                     started = time.perf_counter()
                     try:
                         result = await pruner.prune(
-                            payload, session_key=f"bakeoff-{model}-{scope}-{i}"
+                            payload, session_key=f"bakeoff-{model}-{scope}-{min_chars}-{i}"
                         )
                     except Exception as exc:  # noqa: BLE001
                         store.close()
@@ -270,6 +350,12 @@ async def run_bakeoff(
                     notify(f"{label} [{i + 1}/{len(payloads)}]: answer call failed")
                     continue
 
+                if not candidate_answer.strip():
+                    run.error = "candidate produced no text (tool call?)"
+                    runs.append(run)
+                    notify(f"{label} [{i + 1}/{len(payloads)}]: no text in response")
+                    continue
+
                 try:
                     verdict = await _judge(
                         client, label, _recent_task_text(payload), baseline, candidate_answer
@@ -277,6 +363,17 @@ async def run_bakeoff(
                 except Exception as exc:  # noqa: BLE001
                     verdict = None
                     run.error = f"judge call failed: {exc}"
+
+                run.candidate_answer = candidate_answer
+                run.baseline_answer = baseline
+
+                # No judgement needed when the answer is known: the fact either
+                # survived the trim or it didn't. Returns None for real captures.
+                probe = probe_for_payload(payload)
+                if probe is not None:
+                    run.probe_expected = probe.expected
+                    run.probe_hit = score_answer(candidate_answer, probe)
+                    run.baseline_probe_hit = score_answer(baseline, probe)
 
                 if verdict is not None:
                     run.judge_score = verdict.get("score")
@@ -291,17 +388,27 @@ async def run_bakeoff(
                     f"score={run.judge_score} verdict={run.judge_verdict}"
                 )
 
-    return summarize(runs, models, scopes)
+    if runs_out is not None:
+        runs_out.extend(runs)
+    return summarize(runs, models, scopes, min_chars_values)
 
 
 def summarize(
-    runs: list[CandidateRun], models: list[str], scopes: list[str] | None = None
+    runs: list[CandidateRun],
+    models: list[str],
+    scopes: list[str] | None = None,
+    min_chars_values: list[int] | None = None,
 ) -> list[ModelSummary]:
     scopes = list(scopes) if scopes else sorted({r.scan_scope for r in runs}) or ["tail"]
+    if min_chars_values is None:
+        min_chars_values = sorted({r.min_block_chars for r in runs}) or [0]
     summaries = []
     for model in models:
-        for scope in scopes:
-            rows = [r for r in runs if r.model == model and r.scan_scope == scope]
+        for scope, min_chars in [(s, mc) for s in scopes for mc in min_chars_values]:
+            rows = [
+                r for r in runs
+                if r.model == model and r.scan_scope == scope and r.min_block_chars == min_chars
+            ]
             errors = [r for r in rows if r.error]
             scored = [r for r in rows if r.judge_score is not None]
             timed = [r for r in rows if r.trim_latency_ms is not None]
@@ -311,30 +418,80 @@ def summarize(
             summaries.append(ModelSummary(
                 model=model,
                 scan_scope=scope,
+                min_block_chars=min_chars,
                 runs=len(rows),
                 errors=len(errors),
                 avg_trim_latency_ms=round(sum(r.trim_latency_ms for r in timed) / len(timed), 1) if timed else None,
                 avg_reduction_pct=round(100 * sum(reductions) / len(reductions), 1) if reductions else 0.0,
                 avg_judge_score=round(sum(r.judge_score for r in scored) / len(scored), 2) if scored else None,
                 pass_rate=round(sum(1 for r in scored if r.judge_verdict == "pass") / len(scored), 2) if scored else None,
+                worst_examples=sorted(scored, key=lambda x: x.judge_score)[:2],
+                # Only count probes the baseline itself answered correctly, so
+                # the score reflects damage from pruning and nothing else.
+                probes_available=sum(1 for r in rows if r.baseline_probe_hit),
+                probes_kept=sum(1 for r in rows if r.baseline_probe_hit and r.probe_hit),
+                lost_probes=[
+                    r.probe_expected for r in rows
+                    if r.baseline_probe_hit and not r.probe_hit and r.probe_expected
+                ],
             ))
     return summaries
 
 
+def _excerpt(text: str | None, width: int) -> str:
+    if text is None:
+        return "<none>"
+    flat = " ".join(text.split())
+    if not flat:
+        return "<EMPTY -- model returned no text, probably a tool call>"
+    return flat[:width].rstrip() + ("..." if len(flat) > width else "")
+
+
+def format_rationales(summaries: list[ModelSummary], width: int = 240) -> str:
+    """The worst runs of each candidate: the judge's reasoning and the text judged.
+
+    A score of 2.0 is not actionable on its own -- it cannot say whether the
+    threshold was wrong, the content was irreplaceable, or the answer was empty
+    and the run measured nothing at all. Showing the answers settles that.
+    """
+    lines: list[str] = []
+    for s in summaries:
+        if not s.worst_examples:
+            continue
+        lines.append(f"\n{s.model} ({s.scan_scope}/{s.min_block_chars:,}) -- worst runs:")
+        for r in s.worst_examples:
+            lines.append(f"  [score {r.judge_score}] capture {r.capture_index + 1}")
+            if r.judge_rationale:
+                lines.append(f"    judge:     {_excerpt(r.judge_rationale, width)}")
+            lines.append(f"    baseline:  {_excerpt(r.baseline_answer, width)}")
+            lines.append(f"    candidate: {_excerpt(r.candidate_answer, width)}")
+    return "\n".join(lines)
+
+
 def format_table(summaries: list[ModelSummary]) -> str:
     header = (
-        f"{'model':<28}  {'scope':<5}  {'runs':>5}  {'errs':>5}  {'avg score':>9}  "
-        f"{'pass%':>6}  {'reduction':>9}  {'trim ms':>8}"
+        f"{'model':<26}  {'scope':<5}  {'min_chars':>9}  {'runs':>5}  {'errs':>5}  "
+        f"{'facts':>7}  {'avg score':>9}  {'pass%':>6}  {'reduction':>9}  {'trim ms':>8}"
     )
     lines = [header, "-" * len(header)]
     for s in summaries:
         score = f"{s.avg_judge_score:.2f}" if s.avg_judge_score is not None else "—"
         pass_pct = f"{s.pass_rate * 100:.0f}%" if s.pass_rate is not None else "—"
         trim = f"{s.avg_trim_latency_ms:.0f}" if s.avg_trim_latency_ms is not None else "—"
+        facts = f"{s.probes_kept}/{s.probes_available}" if s.probes_available else "—"
         lines.append(
-            f"{s.model:<28}  {s.scan_scope:<5}  {s.runs:>5}  {s.errors:>5}  {score:>9}  "
-            f"{pass_pct:>6}  {s.avg_reduction_pct:>8}%  {trim:>8}"
+            f"{s.model:<26}  {s.scan_scope:<5}  {s.min_block_chars:>9,}  {s.runs:>5}  "
+            f"{s.errors:>5}  {facts:>7}  {score:>9}  {pass_pct:>6}  "
+            f"{s.avg_reduction_pct:>8}%  {trim:>8}"
         )
+
+    lost = [s for s in summaries if s.lost_probes]
+    if lost:
+        lines.append("")
+        lines.append("Facts destroyed by pruning (the unpruned baseline answered these correctly):")
+        for s in lost:
+            names = ", ".join(s.lost_probes)
+            lines.append(f"  {s.model} ({s.scan_scope}/{s.min_block_chars:,}): {names}")
     return "\n".join(lines)
 
 

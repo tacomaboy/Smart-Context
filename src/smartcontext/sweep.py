@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+from dataclasses import replace
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -124,14 +125,16 @@ async def run_sweep(
             with tempfile.TemporaryDirectory() as tmp:
                 tmp_path = Path(tmp)
                 store = Store(tmp_path / "sweep.db")
-                settings = Settings(
+                # Derive from the caller's settings rather than rebuilding one
+                # field by field: a hand-copied list silently drops any setting
+                # added later (scan_scope did exactly that), and the sweep then
+                # measures a configuration nobody asked for.
+                settings = replace(
+                    base_settings,
                     mode="prune",
                     data_dir=tmp_path,
                     min_block_chars=min_chars,
                     keep_budget_chars=keep_budget,
-                    chunk_chars=base_settings.chunk_chars,
-                    local_model=base_settings.local_model,
-                    ollama_base=base_settings.ollama_base,
                 )
                 pruner = Pruner(settings, store, local)
 

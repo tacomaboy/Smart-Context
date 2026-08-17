@@ -31,6 +31,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from .config import Settings
 from .local_model import LocalModel
 from .pruner import Pruner, estimate_payload_tokens
+from .real_usage import RealUsageClient
 from .store import Store, session_key_for
 from .tokens import estimate_tokens, relative_input_cost, usage_summary
 
@@ -93,6 +94,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         yield
         await app.state.client.aclose()
+        await app.state.real_usage.aclose()
         app.state.store.close()
 
     app = FastAPI(title="smart-context", docs_url=None, redoc_url=None, lifespan=lifespan)
@@ -108,6 +110,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         timeout=httpx.Timeout(settings.upstream_timeout_s, connect=10.0),
         follow_redirects=False,
     )
+    app.state.real_usage = RealUsageClient(settings.admin_api_key)
 
     # ------------------------------------------------------------ control
 
@@ -195,6 +198,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def reset(wipe_chunks: bool = False) -> dict[str, Any]:
         app.state.store.reset(wipe_chunks=wipe_chunks)
         return {"ok": True, "wiped_chunks": wipe_chunks}
+
+    @app.get("/_smartcontext/real-usage")
+    async def real_usage(days: int = 7) -> dict[str, Any]:
+        return await app.state.real_usage.fetch(days=days)
 
     @app.get("/_smartcontext/dashboard-data")
     async def dashboard_data() -> dict[str, Any]:

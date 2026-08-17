@@ -270,6 +270,7 @@
   <p class="sub">Local context held versus context actually sent to the Claude API.</p>
 
   <div id="main"></div>
+  <div id="real-usage"></div>
 
   <p class="footnote">
     Token counts for sent context are exact, taken from each response's <code>usage</code> object.
@@ -279,6 +280,8 @@
     Cost with smart-context uses observed usage-token composition (fresh 1x, cache-read 0.1x,
     cache-write 1.25x). The without-smart-context comparison and local-held totals are modeled from
     local chunk sizing, so they remain directional. Output-token billing is excluded. Refreshes every 5s.
+    The "Actual Anthropic billing" card below, when configured, is not modeled — it comes straight
+    from Anthropic's Usage &amp; Cost Admin API and reflects what you are actually billed. Refreshes every 60s.
   </p>
 </div>
 <div id="tip" role="tooltip"></div>
@@ -300,11 +303,21 @@ const kfmt = n => {
   if (n >= 1e9) return (n/1e9).toFixed(1) + "B";
   if (n >= 1e6) return (n/1e6).toFixed(1) + "M";
   if (n >= 1e3) return (n/1e3).toFixed(1) + "K";
-  return String(n);
+  if (n <= -1e3) return "-" + kfmt(-n);
+  return n.toLocaleString();
 };
 const pct = v => v == null ? "—" : (v*100).toFixed(1) + "%";
-const usd = v => v == null ? "—" : "$" + v.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+/* Sign goes outside the currency symbol: "-$0.12", never "$-0.12". */
+const usd = v => v == null ? "—"
+  : (v < 0 ? "-$" : "$") + Math.abs(v).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
 const ms  = v => v == null ? "—" : v < 1000 ? Math.round(v) + " ms" : (v/1000).toFixed(1) + " s";
+
+/* A figure that is supposed to be a saving. When it isn't, say so loudly --
+   a quiet "-$0.12" in a column headed "Saved" reads as a rounding artefact
+   rather than smart-context having cost money that turn. */
+const signedSaving = (value, text) => Number(value || 0) < 0
+  ? `<span style="color:var(--critical)" title="this turn cost more than sending it unpruned">${text}</span>`
+  : text;
 let selectedRequestId = null;
 const THEME_KEY = "smartcontext-dashboard-theme";
 const THEME_MODES = ["auto", "light", "dark"];
@@ -525,13 +538,23 @@ function promptCostFromUsageUsd(row) {
 }
 
 function rowWithComputedCosts(row) {
-  const localSaved = localSavedTokensEst(row);
+  const beforeTokens = Number(row.est_tokens_before || 0);
   const toolSaved = Number(row.tool_trim_tokens_saved_est || 0);
   const perM = Number(row.est_input_price_per_mtoken_usd || 3);
   const unit = perM / 1_000_000;
   const withSmartContext = promptCostFromUsageUsd(row);
-  const withoutSmartContext = withSmartContext + ((localSaved + toolSaved) * unit);
-  const savings = Math.max(0, withoutSmartContext - withSmartContext);
+  // Computed independently of `withSmartContext`, not additively on top of it --
+  // pricing the full unpruned context at the plain fresh rate (no cache credit
+  // assumed) is a conservative "what if you'd sent all of this" baseline. That
+  // independence is what lets this go negative: if scan_scope="full" rewrote the
+  // cached prefix and turned a cheap cache read (0.1x) into an expensive cache
+  // write (1.25x-2x), or a trimmed tool catalog forced a full-catalog retry,
+  // the real cache-aware cost can exceed even this baseline -- meaning
+  // smart-context cost more than doing nothing that turn. Falls back to
+  // `withSmartContext` (zero savings, not a fake negative) when there's no
+  // pre-prune estimate to compare against.
+  const withoutSmartContext = beforeTokens > 0 ? unit * (beforeTokens + toolSaved) : withSmartContext;
+  const savings = withoutSmartContext - withSmartContext;
   return {
     ...row,
     prompt_cost_with_usd: withSmartContext,
@@ -548,7 +571,9 @@ function summarizePromptCosts(rows) {
     withCost += Number(row.prompt_cost_with_usd || 0);
     withoutCost += Number(row.prompt_cost_without_usd || 0);
   }
-  const savings = Math.max(0, withoutCost - withCost);
+  // Signed -- see the comment in rowWithComputedCosts. A negative aggregate
+  // means smart-context cost more than not pruning over this window.
+  const savings = withoutCost - withCost;
   return {
     withCost,
     withoutCost,
@@ -730,7 +755,13 @@ const STACK = [
 function localSavedTokensEst(row) {
   const before = Number(row.est_tokens_before || 0);
   const after = Number(row.est_tokens_after || 0);
-  return Math.max(0, before - after);
+  // Signed, matching store.stats(): a turn can send MORE than it would have
+  // unpruned -- a trimmed tool catalog that forces a full-catalog retry, or a
+  // rewritten prefix that turns cache reads into writes. Clamping here would
+  // hide exactly the regression this dashboard exists to surface. The stacked
+  // chart clamps at draw time instead, because a bar segment can't go below
+  // the baseline.
+  return before - after;
 }
 
 function hasBeforeAfterEstimates(row) {
@@ -743,7 +774,10 @@ function reductionPct(row) {
   const before = Number(row.est_tokens_before || 0);
   const after = Number(row.est_tokens_after || 0);
   if (before <= 0) return 0;
-  return Math.max(0, 1 - after / before);
+  // Signed: a trimmed tool catalog forcing a full-catalog retry can leave a
+  // turn sending *more* tokens than it would have unpruned -- a negative
+  // value here means exactly that, not "no reduction."
+  return 1 - after / before;
 }
 
 function stackedChart(rows) {
@@ -753,19 +787,30 @@ function stackedChart(rows) {
   const pw = W - M.left - M.right, ph = H - M.top - M.bottom;
 
   const sentTotals = displayRows.map(r => STACK.reduce((s, d) => s + (r[d.key] || 0), 0));
-  const localSaved = displayRows.map(r => localSavedTokensEst(r));
+  // Signed. Positive stacks upward as tokens held back; negative hangs below
+  // the baseline as tokens smart-context ADDED -- a tool-catalog retry, or a
+  // rewritten prefix that turned cache reads into writes.
+  const localSigned = displayRows.map(r => localSavedTokensEst(r));
+  const localSaved = localSigned.map(v => Math.max(0, v));
   const totals = sentTotals.map((t, i) => t + localSaved[i]);
   const max = Math.max(1, ...totals);
   const ticks = niceTicks(max);
   const top = ticks[ticks.length - 1];
-  const y = v => M.top + ph - (v / top) * ph;
+
+  // The axis only drops below zero when a turn actually cost tokens, so the
+  // ordinary chart is unchanged and an overage is visible the moment it exists.
+  const worstOverage = Math.min(0, ...localSigned);
+  const floor = worstOverage < 0 ? -niceTicks(-worstOverage)[niceTicks(-worstOverage).length - 1] : 0;
+  const span = (top - floor) || 1;
+  const y = v => M.top + ph - ((v - floor) / span) * ph;
+  const axisTicks = floor < 0 ? [floor, ...ticks] : ticks;
 
   const band = pw / displayRows.length;
   const bw = Math.min(24, band * 0.62);
 
   const svg = el("svg", { width: W, height: H, role: "img" });
 
-  ticks.forEach(t => {
+  axisTicks.forEach(t => {
     svg.appendChild(el("line", {
       class: t === 0 ? "baseline" : "gridline",
       x1: M.left, x2: M.left + pw, y1: y(t), y2: y(t),
@@ -809,6 +854,17 @@ function stackedChart(rows) {
       cursor += s.value;
     });
 
+    // A turn that sent more than it would have unpruned hangs below the
+    // baseline, in the critical colour so it can't be read as one of the
+    // stacked segments above it.
+    const overage = Math.min(0, localSigned[i]);
+    if (overage < 0) {
+      svg.appendChild(el("rect", {
+        x: cx, y: y(0), width: bw, height: Math.max(1, y(overage) - y(0)),
+        fill: "var(--critical)",
+      }));
+    }
+
     // Hit target spans the whole band, so hovering never demands precision.
     const hit = el("rect", {
       x: M.left + band * i, y: M.top, width: band, height: ph,
@@ -820,6 +876,8 @@ function stackedChart(rows) {
     ).join("");
     const localLine = localHeld > 0
       ? `<div><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--series-4);margin-right:6px"></span>Held locally (est): <b>${fmt(localHeld)}</b></div>`
+      : overage < 0
+      ? `<div><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--critical);margin-right:6px"></span><span style="color:var(--critical)">Sent <b>${fmt(-overage)}</b> MORE than unpruned</span></div>`
       : "";
     hit.addEventListener("mousemove", e => showTip(e,
         `<b>${r.model || "request"}</b><br><span style="color:var(--text-muted)">${when} · ${r.mode}</span><br><br>${lines}${localLine}<div style="margin-top:6px">Sent prompt total: <b>${fmt(sentTotal)}</b></div><div style="margin-top:2px">Without smart-context (est): <b>${fmt(total)}</b></div><div style="margin-top:4px;color:var(--text-muted)">Prompt-side only. Local-held segment is estimated.</div>`));
@@ -846,6 +904,15 @@ function stackedChart(rows) {
   svg.appendChild(axis2);
 
   return svg;
+}
+
+/* fraction > 0 means reduced/saved; fraction < 0 means grew/cost more --
+   labelled and colored distinctly so a regression reads as a regression,
+   not as "0% saved." */
+function signedPctLabel(fraction) {
+  return fraction >= 0
+    ? `−${(fraction * 100).toFixed(0)}%`
+    : `+${(-fraction * 100).toFixed(0)}% more`;
 }
 
 function dumbbellChart(rows) {
@@ -887,8 +954,11 @@ function dumbbellChart(rows) {
     });
 
     const cut = before ? 1 - after / before : 0;
-    const lab = el("text", { class: "dlabel", x: M.left + pw + 8, y: cy + 4 });
-    lab.textContent = "−" + (cut * 100).toFixed(0) + "%";
+    const lab = el("text", {
+      class: "dlabel", x: M.left + pw + 8, y: cy + 4,
+      style: cut < 0 ? "fill:var(--critical)" : "",
+    });
+    lab.textContent = signedPctLabel(cut);
     svg.appendChild(lab);
 
     const hit = el("rect", {
@@ -898,7 +968,7 @@ function dumbbellChart(rows) {
     hit.addEventListener("mousemove", e => showTip(e,
       `<b>${r.model || "request"}</b><br><span style="color:var(--text-muted)">${new Date(r.ts*1000).toLocaleTimeString()}</span><br><br>` +
       `Held locally: <b>${fmt(before)}</b><br>Sent to Claude: <b>${fmt(after)}</b><br>` +
-      `Reduction: <b>${(cut*100).toFixed(1)}%</b><br>` +
+      `${cut < 0 ? "Grew" : "Reduction"}: <b>${(Math.abs(cut)*100).toFixed(1)}%</b><br>` +
       `<span style="color:var(--text-muted)">${r.blocks_filtered} block(s) filtered</span>`));
     hit.addEventListener("mouseleave", hideTip);
     svg.appendChild(hit);
@@ -946,18 +1016,24 @@ function costDumbbellChart(rows) {
     });
 
     const save = before ? 1 - after / before : 0;
-    const lab = el("text", { class: "dlabel", x: M.left + pw + 8, y: cy + 4 });
-    lab.textContent = "−" + (save * 100).toFixed(0) + "%";
+    const lab = el("text", {
+      class: "dlabel", x: M.left + pw + 8, y: cy + 4,
+      style: save < 0 ? "fill:var(--critical)" : "",
+    });
+    lab.textContent = signedPctLabel(save);
     svg.appendChild(lab);
 
     const hit = el("rect", {
       x: M.left, y: cy - rowH / 2, width: pw, height: rowH,
       fill: "transparent", style: "cursor:crosshair",
     });
+    const savedUsd = r.prompt_cost_saved_usd || 0;
     hit.addEventListener("mousemove", e => showTip(e,
       `<b>${r.model || "request"}</b><br><span style="color:var(--text-muted)">${new Date(r.ts*1000).toLocaleTimeString()}</span><br><br>` +
       `Without smart-context: <b>${usd(before)}</b><br>With smart-context: <b>${usd(after)}</b><br>` +
-      `Saved: <b>${usd(r.prompt_cost_saved_usd || 0)}</b> (${(save*100).toFixed(1)}%)<br>` +
+      `${savedUsd < 0
+        ? `<span style="color:var(--critical)">Cost ${usd(-savedUsd)} MORE</span> (${(Math.abs(save)*100).toFixed(1)}%) — cache likely busted this turn`
+        : `Saved: <b>${usd(savedUsd)}</b> (${(save*100).toFixed(1)}%)`}<br>` +
       `<span style="color:var(--text-muted)">${r.est_price_family || "sonnet"} list price · $${(r.est_input_price_per_mtoken_usd || 0).toFixed(2)}/M input tokens</span>`));
     hit.addEventListener("mouseleave", hideTip);
     svg.appendChild(hit);
@@ -973,6 +1049,176 @@ function legend(items) {
     `<span><i class="dot" style="background:var(${i.css})"></i>${i.label}${i.note ? ` <span style="color:var(--text-muted);margin-left:4px">${i.note}</span>` : ""}</span>`
   ).join("");
   return div;
+}
+
+/* --------------------------------------------------- real usage (billed) */
+
+const REAL_STACK = [
+  { key: "cache_read_input_tokens", label: "Cache read (actual)", css: "--series-1" },
+  { key: "cache_creation_tokens",   label: "Cache creation (actual)", css: "--series-2" },
+  { key: "uncached_input_tokens",   label: "Uncached input (actual)", css: "--series-3" },
+];
+
+function realDailyChart(daily) {
+  const W = Math.max(480, daily.length * 34 + 90), H = 220;
+  const M = { top: 12, right: 16, bottom: 28, left: 62 };
+  const pw = W - M.left - M.right, ph = H - M.top - M.bottom;
+
+  const totals = daily.map(r => REAL_STACK.reduce((s, d) => s + (r[d.key] || 0), 0));
+  const max = Math.max(1, ...totals);
+  const ticks = niceTicks(max);
+  const top = ticks[ticks.length - 1];
+  const y = v => M.top + ph - (v / top) * ph;
+
+  const band = pw / daily.length;
+  const bw = Math.min(24, band * 0.62);
+
+  const svg = el("svg", { width: W, height: H, role: "img" });
+
+  ticks.forEach(t => {
+    svg.appendChild(el("line", {
+      class: t === 0 ? "baseline" : "gridline",
+      x1: M.left, x2: M.left + pw, y1: y(t), y2: y(t),
+    }));
+    const lab = el("text", { class: "tick", x: M.left - 10, y: y(t) + 4, "text-anchor": "end" });
+    lab.textContent = kfmt(t);
+    svg.appendChild(lab);
+  });
+
+  daily.forEach((r, i) => {
+    const cx = M.left + band * i + band / 2 - bw / 2;
+    let cursor = 0;
+    const segs = REAL_STACK.map(d => ({ ...d, value: r[d.key] || 0 })).filter(s => s.value > 0);
+    segs.forEach((s, idx) => {
+      const h = (s.value / top) * ph;
+      const yTop = y(cursor + s.value);
+      const gap = idx < segs.length - 1 ? 2 : 0;
+      const isTopMost = idx === segs.length - 1;
+      const drawH = Math.max(0, h - gap);
+      const path = el("path", {
+        d: isTopMost
+          ? topRoundedPath(cx, yTop, bw, drawH, 4)
+          : topRoundedPath(cx, yTop + gap, bw, drawH, 0),
+        fill: `var(${s.css})`,
+      });
+      svg.appendChild(path);
+      cursor += s.value;
+    });
+
+    const hit = el("rect", {
+      x: M.left + band * i, y: M.top, width: band, height: ph,
+      fill: "transparent", style: "cursor:crosshair",
+    });
+    const lines = REAL_STACK.map(d =>
+      `<div><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(${d.css});margin-right:6px"></span>${d.label}: <b>${fmt(r[d.key] || 0)}</b></div>`
+    ).join("");
+    hit.addEventListener("mousemove", e => showTip(e,
+      `<b>${r.date || "day"}</b><br><br>${lines}<div style="margin-top:6px">Total: <b>${fmt(totals[i])}</b></div>`));
+    hit.addEventListener("mouseleave", hideTip);
+    svg.appendChild(hit);
+
+    if (i === 0 || i === daily.length - 1) {
+      const axis = el("text", { class: "tick", x: cx + bw / 2, y: H - 8, "text-anchor": "middle" });
+      axis.textContent = r.date || "";
+      svg.appendChild(axis);
+    }
+  });
+
+  return svg;
+}
+
+function renderRealUsage(data) {
+  const host = document.getElementById("real-usage");
+  if (!host) return;
+
+  if (!data || !data.available) {
+    const reason = data && data.reason === "no_admin_key"
+      ? `Set <code>SMARTCONTEXT_ADMIN_API_KEY</code> (an Admin API key, <code>sk-ant-admin01-...</code> — different from your regular API key, created in Console &rarr; Settings &rarr; Organization) to see real billed cache-hit rate and cost here, straight from Anthropic.`
+      : `Could not load real billing data${data && data.reason ? `: ${escapeHtml(data.reason)}` : ""}.`;
+    host.innerHTML = `<div class="card chart-card">
+      <div class="chart-head"><h2>Actual Anthropic billing</h2></div>
+      <div class="empty"><p>${reason}</p></div>
+    </div>`;
+    return;
+  }
+
+  const days = data.window && data.window.days != null ? data.window.days : 7;
+  const kpis = [
+    { label: "Actual cache hit ratio", value: pct(data.cache_hit_ratio),
+      note: `billed, last ${days}d — compare against the estimated ratio above` },
+    { label: "Actual cost", value: usd(data.real_cost_usd), note: `billed, last ${days}d` },
+  ];
+
+  const card = document.createElement("div");
+  card.className = "card chart-card";
+  card.innerHTML = `<div class="chart-head"><h2>Actual Anthropic billing</h2></div>
+    <p class="chart-sub">Pulled directly from Anthropic's Usage &amp; Cost Admin API — what you're actually billed, not a local estimate. Refreshes every 60s.</p>`;
+
+  const kpiRow = document.createElement("div");
+  kpiRow.className = "kpis";
+  kpiRow.innerHTML = kpis.map(k => `
+    <div class="card">
+      <div class="kpi-label">${k.label}</div>
+      <div class="kpi-value">${k.value}</div>
+      <div class="kpi-note">${k.note}</div>
+    </div>`).join("");
+  card.appendChild(kpiRow);
+
+  if (data.daily && data.daily.length) {
+    card.appendChild(legend(REAL_STACK));
+    const scroll = document.createElement("div");
+    scroll.className = "scroll";
+    scroll.appendChild(realDailyChart(data.daily));
+    card.appendChild(scroll);
+  }
+
+  if (data.by_model && data.by_model.length) {
+    card.appendChild(tableView(data.by_model, [
+      ["Model", r => escapeHtml(r.model || "unknown")],
+      ["Uncached input", r => fmt(r.uncached_input_tokens)],
+      ["Cache read", r => fmt(r.cache_read_input_tokens)],
+      ["Cache creation", r => fmt(r.cache_creation_tokens)],
+      ["Output", r => fmt(r.output_tokens)],
+    ]));
+  }
+
+  if (data.cost_by_model && data.cost_by_model.length) {
+    card.appendChild(tableView(data.cost_by_model, [
+      ["Model", r => escapeHtml(r.model || "unattributed")],
+      ["Actual cost", r => usd(r.usd)],
+    ]));
+  }
+
+  host.innerHTML = "";
+  host.appendChild(card);
+}
+
+async function tickRealUsage() {
+  let resp;
+  try {
+    resp = await fetch("/_smartcontext/real-usage?days=7", { cache: "no-store" });
+  } catch (e) {
+    // Only a genuine transport failure reaches here.
+    renderRealUsage({ available: false, reason: "could not reach the smart-context server" });
+    return;
+  }
+  if (!resp.ok) {
+    // A reply that isn't OK is not a network fault, and calling it one sends
+    // you debugging the wrong layer. 404 in particular means the running
+    // process is older than this endpoint.
+    renderRealUsage({
+      available: false,
+      reason: resp.status === 404
+        ? "this server build has no /real-usage endpoint — restart smart-context to pick it up"
+        : `the server returned HTTP ${resp.status}`,
+    });
+    return;
+  }
+  try {
+    renderRealUsage(await resp.json());
+  } catch (e) {
+    renderRealUsage({ available: false, reason: "the server sent a malformed response" });
+  }
 }
 
 /* ------------------------------------------------------------------ page */
@@ -1018,6 +1264,8 @@ function render(d) {
   const kpis = document.createElement("div");
   kpis.className = "kpis";
   const hit = s.cache_hit_ratio;
+  const tokensSavedNegative = s.tokens_saved < 0;
+  const savingsNegative = costs.savings < 0;
   const kpiData = [
     { label: "Sent to Claude", value: kfmt(d.sent_tokens), note: "exact, from usage" },
     { label: "Held locally", value: kfmt(d.elided_tokens_est), note: "estimated, recallable" },
@@ -1026,17 +1274,23 @@ function render(d) {
           : hit >= 0.2 ? "moderate"
           : "low — something is invalidating the prefix" },
     { label: "Requests", value: fmt(s.requests), note: `${fmt(s.blocks_filtered)} blocks filtered` },
-    { label: "Tokens saved", value: kfmt(s.tokens_saved), note: "before vs. after pruning, estimated" },
+    { label: "Tokens saved", value: kfmt(s.tokens_saved),
+      note: tokensSavedNegative
+        ? "negative — pruning sent MORE tokens than it would have unpruned"
+        : "before vs. after pruning, estimated",
+      critical: tokensSavedNegative },
     { label: "Context reduced", value: pct(s.avg_reduction_pct), note: "average, across pruned requests" },
     { label: "Estimated prompt cost", value: usd(costs.withCost), note: `${usd(costs.withoutCost)} without smart-context, modeled` },
-    { label: "Estimated cost savings", value: pct(costs.savingsPct), note: `${usd(costs.savings)} saved` },
+    { label: "Estimated cost savings", value: pct(costs.savingsPct),
+      note: savingsNegative ? `costing ${usd(-costs.savings)} MORE than not pruning` : `${usd(costs.savings)} saved`,
+      critical: savingsNegative },
     { label: "Avg. trim time", value: ms(s.avg_trim_time_ms), note: "local model latency per request" },
   ];
   kpis.innerHTML = kpiData.map(k => `
     <div class="card">
       <div class="kpi-label">${k.label}</div>
-      <div class="kpi-value">${k.value}</div>
-      <div class="kpi-note">${k.note}</div>
+      <div class="kpi-value"${k.critical ? ' style="color:var(--critical)"' : ""}>${k.value}</div>
+      <div class="kpi-note"${k.critical ? ' style="color:var(--critical)"' : ""}>${k.note}</div>
     </div>`).join("");
   main.appendChild(kpis);
 
@@ -1049,9 +1303,16 @@ function render(d) {
   c1.className = "card chart-card";
   c1.innerHTML = `<div class="chart-head"><h2>Prompt token composition</h2></div>
     <p class="chart-sub">Each bar is one request over time. Blue/orange/teal are prompt tokens sent to Anthropic. Green on top is estimated tokens kept local by smart-context (what would otherwise have been sent). This is per-request flow, not Anthropic cache-size growth.</p>`;
+  // The overage entry appears only when some turn actually cost tokens, so the
+  // legend doesn't advertise a failure mode that isn't happening.
+  const anyOverage = rows.some(r => localSavedTokensEst(r) < 0);
   c1.appendChild(legend([
     ...STACK,
     { key: "local_saved_tokens_est", label: "Held locally (est)", css: "--series-4", note: "not sent upstream" },
+    ...(anyOverage
+      ? [{ key: "local_overage", label: "Sent MORE than unpruned", css: "--critical",
+           note: "below the baseline; smart-context cost tokens this turn" }]
+      : []),
   ]));
   const scroll1 = document.createElement("div");
   scroll1.className = "scroll";
@@ -1064,7 +1325,10 @@ function render(d) {
     ["Cache read", r => fmt(r.cache_read_tokens)],
     ["Cache write", r => fmt(r.cache_write_tokens)],
     ["Fresh input", r => fmt(r.input_tokens)],
-    ["Held locally (est)", r => fmt(localSavedTokensEst(r))],
+    ["Held locally (est)", r => {
+      const v = localSavedTokensEst(r);
+      return signedSaving(v, fmt(v));
+    }],
     ["Tools trimmed (est)", r => fmt(r.tool_trim_tokens_saved_est || 0)],
     ["Output", r => fmt(r.output_tokens)],
   ]));
@@ -1100,7 +1364,7 @@ function render(d) {
   const cCost = document.createElement("div");
   cCost.className = "card chart-card";
   cCost.innerHTML = `<div class="chart-head"><h2>Prompt cost impact</h2></div>
-    <p class="chart-sub">Per request, estimated prompt-input cost without smart-context versus with smart-context, priced from the actual logged upstream model for that request. Uses observed fresh/cache-read/cache-write usage; output-token billing is excluded.</p>`;
+    <p class="chart-sub">Per request, estimated prompt-input cost without smart-context versus with smart-context, priced from the actual logged upstream model for that request. Uses observed fresh/cache-read/cache-write usage; output-token billing is excluded. This can go negative — shown in red — when pruning cost more than doing nothing that turn (a busted cache prefix under <code>scan_scope=full</code>, or a trimmed tool catalog forcing a full-catalog retry).</p>`;
   if (compared.length) {
     cCost.appendChild(legend([
       { css: "--before", label: "Without smart-context (est.)" },
@@ -1115,7 +1379,7 @@ function render(d) {
       ["Price basis", r => `${r.est_price_family || "sonnet"} · $${(r.est_input_price_per_mtoken_usd || 0).toFixed(2)}/M input tokens`],
       ["Without smart-context (est.)", r => usd(r.prompt_cost_without_usd)],
       ["With smart-context (est.)", r => usd(r.prompt_cost_with_usd)],
-      ["Saved (est.)", r => usd(r.prompt_cost_saved_usd)],
+      ["Saved (est.)", r => signedSaving(r.prompt_cost_saved_usd, usd(r.prompt_cost_saved_usd))],
       ["Savings % (est.)", r => pct(r.prompt_cost_saved_pct)],
     ]));
   } else {
@@ -1199,6 +1463,8 @@ document.getElementById("theme-btn").addEventListener("click", cycleTheme);
 initTheme();
 tick();
 setInterval(tick, 5000);
+tickRealUsage();
+setInterval(tickRealUsage, 60000);
 </script>
 </body>
 </html>

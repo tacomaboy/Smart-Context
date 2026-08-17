@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import sys
+from pathlib import Path
 
 from .config import Settings
 from .local_model import LocalModel
@@ -108,6 +109,10 @@ def cmd_doctor(_: argparse.Namespace) -> int:
     print(f"scope:     {settings.scan_scope}")
     print(f"upstream:  {settings.upstream}")
     print(f"store:     {settings.db_path}")
+    if settings.admin_api_key:
+        print("real usage tracking: configured (dashboard will show actual billed cost/cache-hit rate)")
+    else:
+        print("real usage tracking: not configured (set SMARTCONTEXT_ADMIN_API_KEY to enable)")
 
     problem = asyncio.run(
         LocalModel(settings.local_model, settings.ollama_base, settings.local_timeout_s).preflight()
@@ -155,11 +160,37 @@ def cmd_sweep(args: argparse.Namespace) -> int:
 
 
 def cmd_bakeoff(args: argparse.Namespace) -> int:
-    from .bakeoff import JUDGE_MODEL, estimate_plan, format_table, run_bakeoff
+    from .bakeoff import (
+        JUDGE_MODEL,
+        default_results_path,
+        estimate_plan,
+        format_rationales,
+        format_table,
+        run_bakeoff,
+        save_results,
+    )
     from .sweep import load_captures
 
     settings = Settings.from_env()
-    payloads = load_captures(settings.captures_dir)[: args.limit]
+
+    if args.session:
+        from .sweep import load_capture_sessions_keyed
+
+        keyed = load_capture_sessions_keyed(settings.captures_dir)
+        matches = [item for item in keyed if item[0].startswith(args.session)]
+        if len(matches) > 1:
+            print(f"{args.session!r} matches {len(matches)} sessions; be more specific.")
+            return 1
+        if not matches:
+            print(f"No session matching {args.session!r}.")
+            print("List them with: smart-context replay --models x --list-sessions")
+            return 1
+        session_key, payloads = matches[0]
+        payloads = payloads[: args.limit]
+        print(f"Session: {session_key}")
+    else:
+        payloads = load_captures(settings.captures_dir)[: args.limit]
+
     if not payloads:
         print(f"No captures found in {settings.captures_dir}.")
         print("Run the proxy with --capture (or SMARTCONTEXT_CAPTURE=1) and send some real traffic first.")
@@ -175,10 +206,15 @@ def cmd_bakeoff(args: argparse.Namespace) -> int:
             print(f"Local model unusable: {problem}")
             return 1
 
-    plan = estimate_plan(payloads, args.models, args.scopes)
+    min_chars = args.min_chars or [settings.min_block_chars]
+    plan = estimate_plan(payloads, args.models, args.scopes, min_chars)
     print(
         f"Captures: {plan['captures']}   Candidate models: {plan['models']}   "
-        f"Scan scopes: {', '.join(args.scopes)}   Candidates: {plan['candidates']}"
+        f"Scan scopes: {', '.join(args.scopes)}"
+    )
+    print(
+        f"  min_block_chars: {', '.join(str(m) for m in min_chars)}   "
+        f"Candidates: {plan['candidates']}"
     )
     print(f"  baseline live calls:        {plan['baseline_calls']}")
     print(f"  candidate answer calls:     {plan['candidate_calls']}")
@@ -198,11 +234,31 @@ def cmd_bakeoff(args: argparse.Namespace) -> int:
         return 1
 
     client = anthropic.AsyncAnthropic()
+    runs: list = []
     summaries = asyncio.run(
-        run_bakeoff(payloads, args.models, settings, client, scopes=args.scopes, on_event=print)
+        run_bakeoff(payloads, args.models, settings, client, scopes=args.scopes,
+                    min_chars_values=min_chars, on_event=print, runs_out=runs)
     )
+
+    # Save before printing: a paid run must survive a closed terminal.
+    out = Path(args.out) if args.out else default_results_path(settings.data_dir, "bakeoff")
+    try:
+        saved = save_results(
+            out, command="bakeoff", summaries=summaries, runs=runs,
+            invocation={
+                "models": args.models, "scopes": args.scopes,
+                "min_chars": min_chars, "session": args.session, "limit": args.limit,
+            },
+        )
+        print(f"\nResults saved to {saved}")
+    except OSError as exc:
+        print(f"\nWARNING: could not save results ({exc}) -- copy the output below now")
+
     print()
     print(format_table(summaries))
+    rationales = format_rationales(summaries)
+    if rationales:
+        print(rationales)
     print()
     print("Scores come from a single fixed judge model -- a proxy for")
     print("answer quality, not a guarantee. Judge and target-model calls are live and billed.")
@@ -210,7 +266,13 @@ def cmd_bakeoff(args: argparse.Namespace) -> int:
 
 
 def cmd_replay(args: argparse.Namespace) -> int:
-    from .bakeoff import estimate_replay_plan, format_replay_table, run_replay
+    from .bakeoff import (
+        default_results_path,
+        estimate_replay_plan,
+        format_replay_table,
+        run_replay,
+        save_results,
+    )
     from .sweep import load_capture_sessions_keyed
 
     settings = Settings.from_env()
@@ -302,6 +364,20 @@ def cmd_replay(args: argparse.Namespace) -> int:
         run_replay(session, args.models, settings, client, scopes=args.scopes,
                    ttl=args.ttl, cooldown_s=args.cooldown, on_event=print)
     )
+
+    out = Path(args.out) if args.out else default_results_path(settings.data_dir, "replay")
+    try:
+        saved = save_results(
+            out, command="replay", summaries=summaries,
+            invocation={
+                "models": args.models, "scopes": args.scopes, "session": session_key,
+                "limit": args.limit, "ttl": args.ttl, "cooldown": args.cooldown,
+            },
+        )
+        print(f"\nResults saved to {saved}")
+    except OSError as exc:
+        print(f"\nWARNING: could not save results ({exc}) -- copy the output below now")
+
     print()
     print(format_replay_table(summaries))
     print()
@@ -309,6 +385,29 @@ def cmd_replay(args: argparse.Namespace) -> int:
     print("  fresh x1.0 + cache read x0.1 + cache write x1.25 (5m) or x2.0 (1h).")
     print("Lower wins. Compare each scope against the 'off' arm -- if a scope trims more")
     print("but scores a higher rel cost, it bought reduction with cache invalidation.")
+    return 0
+
+
+def cmd_synth(args: argparse.Namespace) -> int:
+    from .synth import FACTS, PROBES, write_session
+
+    settings = Settings.from_env()
+    written = write_session(
+        settings.captures_dir,
+        session_key=args.session_key,
+        filler_chars=args.filler_chars,
+    )
+    print(f"Wrote {len(written)} synthetic capture(s) to {settings.captures_dir}")
+    print(f"  session key: {args.session_key}")
+    print(f"  facts planted: {len(FACTS)}   probes asked back: {len(PROBES)}")
+    print(f"  filler per turn: ~{args.filler_chars:,} chars of worthless build log")
+    print()
+    print("Every probe has one correct answer that appears earlier in the conversation,")
+    print("separated from the question by filler. An ideal pruner drops all the filler")
+    print("and keeps every fact, so a wrong answer means pruning destroyed something.")
+    print()
+    print("Replay it with:")
+    print(f"  smart-context replay --models <model> --session {args.session_key} --limit 8 --yes")
     return 0
 
 
@@ -361,12 +460,42 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sweep.set_defaults(func=cmd_sweep)
 
+    synth = sub.add_parser(
+        "synth",
+        help="offline: generate a capture session with known answers, for measuring pruning",
+    )
+    synth.add_argument(
+        "--session-key", default="synthetic0000000",
+        help="session key to write under (default: synthetic0000000)",
+    )
+    synth.add_argument(
+        "--filler-chars", type=int, default=12000,
+        help="size of the worthless tool output planted each turn (default: 12000)",
+    )
+    synth.set_defaults(func=cmd_synth)
+
     bakeoff = sub.add_parser(
         "bakeoff", help="live: compare local models on captured payloads, scored by a fixed judge"
     )
     bakeoff.add_argument(
         "--models", nargs="+", required=True,
         help="Ollama model tags to compare, e.g. --models qwen3-coder:latest llama3.2:3b",
+    )
+    bakeoff.add_argument(
+        "--session", default=None,
+        help=(
+            "restrict to one captured session, by key or prefix (e.g. synthetic0000000). "
+            "Without it, captures are taken oldest-first across every session."
+        ),
+    )
+    bakeoff.add_argument(
+        "--min-chars", type=int, nargs="+", default=None, dest="min_chars",
+        help=(
+            "SMARTCONTEXT_MIN_BLOCK_CHARS values to score, e.g. --min-chars 2000 8000. "
+            "This is the judged version of `sweep`: sweep shows what each threshold "
+            "saves, this shows what it costs in answer quality. Each value is a "
+            "separate candidate, so listing three triples the live API spend."
+        ),
     )
     bakeoff.add_argument(
         "--scopes", nargs="+", choices=["tail", "full"], default=["tail"],
@@ -382,6 +511,10 @@ def build_parser() -> argparse.ArgumentParser:
     bakeoff.add_argument(
         "--yes", action="store_true",
         help="actually fire the live API calls; without this, only print the cost estimate",
+    )
+    bakeoff.add_argument(
+        "--out", default=None,
+        help="where to save results (default: <data-dir>/results/<timestamp>-bakeoff.json)",
     )
     bakeoff.set_defaults(func=cmd_bakeoff)
 
@@ -427,6 +560,10 @@ def build_parser() -> argparse.ArgumentParser:
     replay.add_argument(
         "--yes", action="store_true",
         help="actually fire the live API calls; without this, only print the cost estimate",
+    )
+    replay.add_argument(
+        "--out", default=None,
+        help="where to save results (default: <data-dir>/results/<timestamp>-replay.json)",
     )
     replay.set_defaults(func=cmd_replay)
 
